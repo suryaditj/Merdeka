@@ -6,7 +6,7 @@ from config import (
 )
 
 # ============================================================
-# CANDLE DATA PARSER (100 CLOSED CANDLES)
+# CANDLE DATA PARSER (100 CLOSED CANDLES — INDEPENDEN PER TF)
 # ============================================================
 
 def extract_candle_list(data):
@@ -104,7 +104,7 @@ def get_latest_price(symbol):
 
 
 # ============================================================
-# RADAR SESI KILLZONES & CEK KEAMANAN PENDING LIMIT
+# RADAR SESI PASAR (WINTER TIME WIB) & LIQUIDITY SWEEP
 # ============================================================
 
 def get_session_killzone_info(symbol):
@@ -114,44 +114,62 @@ def get_session_killzone_info(symbol):
     total_min = hour * 60 + minute
     jam_str = now_wib.strftime("%H:%M WIB")
 
-    # Cek jam rawan pembukaan sesi utama (London Open 13:45-15:30 & NY Open 19:15-21:30 WIB)
-    is_london_open = (13 * 60 + 45) <= total_min <= (15 * 60 + 30)
-    is_ny_open = (19 * 60 + 15) <= total_min <= (21 * 60 + 30)
+    # Pembagian Sesi Akurat (Winter Time WIB):
+    # - USA / New York Session : 20:15 WIB - 03:59 WIB (termasuk jam 00:00 WIB)
+    # - Sydney / Pre-Asia      : 04:00 WIB - 08:44 WIB
+    # - Asia Utama (HK/SG/TKY) : 08:45 WIB - 14:44 WIB
+    # - London / Eropa Session : 14:45 WIB - 20:14 WIB
+
+    is_ny_open = (20 * 60 + 15) <= total_min <= (22 * 60 + 30)
+    is_london_open = (14 * 60 + 45) <= total_min <= (16 * 60 + 30)
+    is_asia_open = (8 * 60 + 45) <= total_min <= (9 * 60 + 30)
 
     if is_ny_open:
         return (
             f"🚨 NEW YORK OPEN ({jam_str}) — Volatilitas Ekstrem",
             False,
-            "WASPADA NY OPEN (Hindari Limit Buta, Tunggu Rejection M5)"
+            "WASPADA NY OPEN (Tunggu Rejection M1/M5, Hindari Limit Buta)"
+        )
+    if (22 * 60 + 31) <= total_min <= (23 * 60 + 59) or hour < 4:
+        return (
+            f"🇺🇸 NEW YORK / USA SESSION ({jam_str}) — Likuiditas Amerika",
+            True,
+            "AMAN PASANG LIMIT (Pantau London Close 00:00 WIB)"
         )
     if is_london_open:
         return (
             f"⚠️ LONDON OPEN ({jam_str}) — Rawan Sapuan Likuiditas",
             False,
-            "WASPADA LONDON OPEN (Gunakan Konfirmasi Rejection M5)"
+            "WASPADA LONDON OPEN (Gunakan Konfirmasi Rejection M1/M5)"
         )
-    if 19 <= hour < 23:
-        return (
-            f"🔥 PRIME KILLZONE ({jam_str}) — Overlap London & NY",
-            True,
-            "AMAN PASANG LIMIT (Pantau Berita US)"
-        )
-    if 14 <= hour < 19:
+    if 15 <= hour < 20:
         return (
             f"⚡ LONDON SESSION ({jam_str}) — Struktur Rapi",
             True,
             "AMAN PASANG LIMIT (Zona Struktur Efektif)"
         )
+    if is_asia_open:
+        return (
+            f"🌏 ASIA OPEN ({jam_str}) — Likuiditas Penuh Asia",
+            True,
+            "AMAN PASANG LIMIT (Pantau Range Pagi)"
+        )
+    if 8 <= hour < 15:
+        return (
+            f"🌏 ASIA SESSION ({jam_str}) — Range Terkontrol",
+            True,
+            "AMAN PASANG LIMIT (Ideal untuk Pantulan Range)"
+        )
     if symbol == "BTCUSD":
         return (
-            f"🌐 CRYPTO 24/7 SESSION ({jam_str}) — Likuiditas Stabil",
+            f"🌐 CRYPTO 24/7 SESSION ({jam_str}) — Likuiditas Aktif",
             True,
             "AMAN PASANG LIMIT"
         )
     return (
-        f"🌙 ASIA SESSION ({jam_str}) — Range Tenang",
+        f"🇦🇺 SYDNEY / PRE-ASIA SESSION ({jam_str}) — Volume Tipis",
         True,
-        "AMAN PASANG LIMIT (Ideal untuk Pantulan Range)"
+        "AMAN PASANG LIMIT (Spread & Volume Pagi)"
     )
 
 
@@ -176,188 +194,112 @@ def detect_liquidity_sweep(candles):
 
 
 # ============================================================
-# ZONA JEMPUTAN (UNMITIGATED SELL LIMIT & BUY LIMIT)
+# HELPER STATISTIK CANDLE
 # ============================================================
 
-def find_pending_limit_zones(candles):
-    """
-    Mencari zona ekstrem belum tersentuh (Unmitigated OB / Supply / Demand / Swing)
-    di atas harga saat ini (untuk SELL LIMIT) dan di bawah harga saat ini (untuk BUY LIMIT).
-    """
-    price = candles[-1]["close"]
-    lookback = candles[-80:-1]
-
-    recent_14 = candles[-14:]
-    avg_range = sum(c["high"] - c["low"] for c in recent_14) / len(recent_14)
-    if avg_range <= 0:
-        avg_range = price * 0.001
-
-    sell_limit_zone = None
-    buy_limit_zone = None
-
-    # 1. Cari Unmitigated Bearish OB / Supply di ATAS harga sekarang (SELL LIMIT)
-    for i in range(len(lookback) - 3, 3, -1):
-        c = lookback[i]
-        c1 = lookback[i + 1]
-        if c["close"] > c["open"]:
-            c1_rng = c1["high"] - c1["low"]
-            c1_body = c1["open"] - c1["close"]
-            if c1_rng > 0 and c1_body >= c1_rng * 0.55 and c1["close"] < c["low"]:
-                z_low = c["low"]
-                z_high = c["high"]
-                if z_low > price + (avg_range * 0.25):
-                    mitigated = any(lookback[k]["high"] >= z_low for k in range(i + 2, len(lookback)))
-                    if not mitigated:
-                        if sell_limit_zone is None or z_low < sell_limit_zone["entry_low"]:
-                            sl = z_high + avg_range * 1.1
-                            risk = sl - z_low
-                            sell_limit_zone = {
-                                "label": "Unmitigated Bearish OB",
-                                "entry_low": z_low,
-                                "entry_high": z_high,
-                                "sl": sl,
-                                "tp1": z_low - risk * 1.5,
-                                "tp2": z_low - risk * 2.5
-                            }
-
-    # Fallback jika belum ada Bearish OB di atas -> gunakan Strong Swing High terdekat di atas
-    if sell_limit_zone is None:
-        above_highs = [c["high"] for c in lookback if c["high"] > price + (avg_range * 0.4)]
-        if above_highs:
-            top_res = max(above_highs[-15:]) if len(above_highs) >= 15 else max(above_highs)
-            z_low = top_res - avg_range * 0.25
-            z_high = top_res
-            sl = z_high + avg_range * 1.1
-            risk = sl - z_low
-            sell_limit_zone = {
-                "label": "Major Supply / Swing High",
-                "entry_low": z_low,
-                "entry_high": z_high,
-                "sl": sl,
-                "tp1": z_low - risk * 1.5,
-                "tp2": z_low - risk * 2.5
-            }
-
-    # 2. Cari Unmitigated Bullish OB / Demand di BAWAH harga sekarang (BUY LIMIT)
-    for i in range(len(lookback) - 3, 3, -1):
-        c = lookback[i]
-        c1 = lookback[i + 1]
-        if c["close"] < c["open"]:
-            c1_rng = c1["high"] - c1["low"]
-            c1_body = c1["close"] - c1["open"]
-            if c1_rng > 0 and c1_body >= c1_rng * 0.55 and c1["close"] > c["high"]:
-                z_low = c["low"]
-                z_high = c["high"]
-                if z_high < price - (avg_range * 0.25):
-                    mitigated = any(lookback[k]["low"] <= z_high for k in range(i + 2, len(lookback)))
-                    if not mitigated:
-                        if buy_limit_zone is None or z_high > buy_limit_zone["entry_high"]:
-                            sl = z_low - avg_range * 1.1
-                            risk = z_high - sl
-                            buy_limit_zone = {
-                                "label": "Unmitigated Bullish OB",
-                                "entry_low": z_low,
-                                "entry_high": z_high,
-                                "sl": sl,
-                                "tp1": z_high + risk * 1.5,
-                                "tp2": z_high + risk * 2.5
-                            }
-
-    # Fallback jika belum ada Bullish OB di bawah -> gunakan Strong Swing Low terdekat di bawah
-    if buy_limit_zone is None:
-        below_lows = [c["low"] for c in lookback if c["low"] < price - (avg_range * 0.4)]
-        if below_lows:
-            bot_sup = min(below_lows[-15:]) if len(below_lows) >= 15 else min(below_lows)
-            z_low = bot_sup
-            z_high = bot_sup + avg_range * 0.25
-            sl = z_low - avg_range * 1.1
-            risk = z_high - sl
-            buy_limit_zone = {
-                "label": "Major Demand / Swing Low",
-                "entry_low": z_low,
-                "entry_high": z_high,
-                "sl": sl,
-                "tp1": z_high + risk * 1.5,
-                "tp2": z_high + risk * 2.5
-            }
-
-    return sell_limit_zone, buy_limit_zone
+def _calc_avg_range(candles, period=20):
+    sl = candles[-period:] if len(candles) >= period else candles
+    avg = sum(c["high"] - c["low"] for c in sl) / max(1, len(sl))
+    if avg <= 0:
+        avg = candles[-1]["close"] * 0.001
+    return avg
 
 
 # ============================================================
-# 7 METODE ANALISA MURNI SMC
+# 7 METODE ANALISA MURNI SMC (UNMITIGATED & RETEST-REJECT)
 # ============================================================
 
 def detect_ob(candles):
-    recent = candles[-1]
-    price = recent["close"]
-    lookback = candles[-60:-1]
-    if len(lookback) < 12:
-        return "NEUTRAL", "-", None, None
+    """
+    1. Order Block (OB) Segar (Unmitigated):
+    Mencari candle terakhir berlawanan arah sebelum dorongan impulsif yang belum pernah
+    ditembus close candle berikutnya, lalu memeriksa apakah harga sekarang sedang
+    menyentuh zona OB tersebut.
+    """
+    price = candles[-1]["close"]
+    last_low = candles[-1]["low"]
+    last_high = candles[-1]["high"]
+    lookback = candles[:-1]
+    avg_range = _calc_avg_range(lookback, 25)
+    buffer = avg_range * 0.30
 
-    avg_range = sum(c["high"] - c["low"] for c in lookback) / len(lookback)
-    if avg_range <= 0:
-        avg_range = price * 0.001
-    buffer = avg_range * 0.45
-
-    for i in range(len(lookback) - 4, 4, -1):
+    for i in range(len(lookback) - 3, 4, -1):
         ob = lookback[i]
         c1 = lookback[i + 1]
-        c2 = lookback[i + 2]
         ob_low, ob_high = ob["low"], ob["high"]
 
-        prev_slice = lookback[max(0, i - 8):i]
-        impulse_slice = lookback[i + 1: min(len(lookback), i + 4)]
-
+        # Bullish OB: candle turun diikuti dorongan naik kuat
         if ob["close"] < ob["open"]:
-            c1_range = c1["high"] - c1["low"]
+            c1_rng = c1["high"] - c1["low"]
             c1_body = c1["close"] - c1["open"]
-            strong_impulse = c1_range > 0 and c1_body >= c1_range * 0.55 and c1["close"] > ob_high
-            has_fvg = c2["low"] > ob_high
-            prev_swing_high = max(c["high"] for c in prev_slice)
-            broke_structure = any(c["close"] > prev_swing_high for c in impulse_slice)
+            impulsive = c1_rng > 0 and c1_body >= c1_rng * 0.50 and c1["close"] > ob_high
+            if impulsive:
+                invalidated = any(lookback[k]["close"] < ob_low - buffer for k in range(i + 2, len(lookback)))
+                if not invalidated:
+                    in_zone = (ob_low - buffer <= price <= ob_high + buffer) or (last_low <= ob_high and price >= ob_low)
+                    if in_zone:
+                        return "BUY", "Bullish OB", ob_low, ob_high
 
-            if strong_impulse and has_fvg and broke_structure:
-                invalidated = any(
-                    lookback[k]["close"] < ob_low - (buffer * 0.5)
-                    for k in range(i + 3, len(lookback))
-                )
-                if not invalidated and (ob_low - buffer <= price <= ob_high + buffer):
-                    return "BUY", "Bullish OB", ob_low, ob_high
-
+        # Bearish OB: candle naik diikuti dorongan turun kuat
         if ob["close"] > ob["open"]:
-            c1_range = c1["high"] - c1["low"]
+            c1_rng = c1["high"] - c1["low"]
             c1_body = c1["open"] - c1["close"]
-            strong_impulse = c1_range > 0 and c1_body >= c1_range * 0.55 and c1["close"] < ob_low
-            has_fvg = c2["high"] < ob_low
-            prev_swing_low = min(c["low"] for c in prev_slice)
-            broke_structure = any(c["close"] < prev_swing_low for c in impulse_slice)
-
-            if strong_impulse and has_fvg and broke_structure:
-                invalidated = any(
-                    lookback[k]["close"] > ob_high + (buffer * 0.5)
-                    for k in range(i + 3, len(lookback))
-                )
-                if not invalidated and (ob_low - buffer <= price <= ob_high + buffer):
-                    return "SELL", "Bearish OB", ob_low, ob_high
+            impulsive = c1_rng > 0 and c1_body >= c1_rng * 0.50 and c1["close"] < ob_low
+            if impulsive:
+                invalidated = any(lookback[k]["close"] > ob_high + buffer for k in range(i + 2, len(lookback)))
+                if not invalidated:
+                    in_zone = (ob_low - buffer <= price <= ob_high + buffer) or (last_high >= ob_low and price <= ob_high)
+                    if in_zone:
+                        return "SELL", "Bearish OB", ob_low, ob_high
 
     return "NEUTRAL", "-", None, None
 
 
 def detect_fvg(candles):
-    for i in range(len(candles) - 1, 1, -1):
-        first = candles[i - 2]
-        third = candles[i]
-        if third["low"] > first["high"]:
-            return "BUY", first["high"], third["low"]
-        if third["high"] < first["low"]:
-            return "SELL", third["high"], first["low"]
+    """
+    2. Fair Value Gap (FVG) Segar (Unmitigated):
+    Hanya aktif jika ada FVG yang belum tertutup penuh oleh candle berikutnya DAN
+    harga berjalan saat ini sedang berada/retest di dalam celah FVG tersebut.
+    """
+    price = candles[-1]["close"]
+    last_low = candles[-1]["low"]
+    last_high = candles[-1]["high"]
+    lookback = candles[:-1]
+    avg_range = _calc_avg_range(lookback, 25)
+    buffer = avg_range * 0.20
+
+    for i in range(len(lookback) - 1, 2, -1):
+        c1 = lookback[i - 2]
+        c3 = lookback[i]
+
+        # Bullish FVG (Gap Bawah)
+        if c3["low"] > c1["high"]:
+            gap_low = c1["high"]
+            gap_high = c3["low"]
+            filled = any(lookback[k]["close"] < gap_low for k in range(i + 1, len(lookback)))
+            if not filled:
+                if (gap_low - buffer <= price <= gap_high + buffer) or (last_low <= gap_high and price >= gap_low):
+                    return "BUY", gap_low, gap_high
+
+        # Bearish FVG (Gap Atas)
+        if c3["high"] < c1["low"]:
+            gap_low = c3["high"]
+            gap_high = c1["low"]
+            filled = any(lookback[k]["close"] > gap_high for k in range(i + 1, len(lookback)))
+            if not filled:
+                if (gap_low - buffer <= price <= gap_high + buffer) or (last_high >= gap_low and price <= gap_high):
+                    return "SELL", gap_low, gap_high
+
     return "NEUTRAL", None, None
 
 
 def detect_bos(candles):
+    """
+    3. Break of Structure (BOS):
+    Mengecek penembusan struktur swing 15 candle terakhir dengan body close valid.
+    """
     recent = candles[-1]
-    previous = candles[-11:-1]
+    previous = candles[-16:-1]
     highest = max(c["high"] for c in previous)
     lowest = min(c["low"] for c in previous)
     if recent["close"] > highest:
@@ -368,133 +310,328 @@ def detect_bos(candles):
 
 
 def detect_snr(candles):
-    recent = candles[-1]
-    previous = candles[-30:-1]
+    """
+    4. Support & Resistance (SNR) dengan Konfirmasi Reject Nyata:
+    Aktif jika harga menyentuh Support/Resistance 35 candle terakhir dan menunjukkan
+    penolakan (ekor menusuk zona lalu close mental balik).
+    """
+    last = candles[-1]
+    prev_c = candles[-2]
+    previous = candles[-36:-1]
     support = min(c["low"] for c in previous)
     resistance = max(c["high"] for c in previous)
-    price = recent["close"]
-    avg_range = sum(c["high"] - c["low"] for c in previous) / len(previous)
-    threshold = avg_range * 1.5
-    if abs(price - support) <= threshold:
+    price = last["close"]
+    avg_range = _calc_avg_range(previous, 25)
+    zone_tol = avg_range * 0.60
+
+    touched_sup = (last["low"] <= support + zone_tol) or (prev_c["low"] <= support + zone_tol)
+    rejected_sup = price > support and last["close"] >= last["open"]
+    if touched_sup and rejected_sup and abs(price - support) <= avg_range * 1.2:
         return "BUY", support
-    if abs(resistance - price) <= threshold:
+
+    touched_res = (last["high"] >= resistance - zone_tol) or (prev_c["high"] >= resistance - zone_tol)
+    rejected_res = price < resistance and last["close"] <= last["open"]
+    if touched_res and rejected_res and abs(resistance - price) <= avg_range * 1.2:
         return "SELL", resistance
+
     return "NEUTRAL", None
 
 
 def detect_sbr_rbs(candles):
-    recent = candles[-1]
-    price = recent["close"]
-    lookback = candles[-60:-1]
-    if len(lookback) < 10:
-        return "NEUTRAL", "-", None
+    """
+    5. Breakout -> Retest -> Reject (RBS & SBR):
+    Mendeteksi urutan lengkap:
+      Tahap 1: Body close menembus Swing High (RBS) atau Swing Low (SBR)
+      Tahap 2: Harga berbalik menyentuh kembali level tembusan (Retest)
+      Tahap 3: Candle menolak level tersebut (Reject) -> Sinyal BUY/SELL aktif
+    """
+    last = candles[-1]
+    prev_c = candles[-2]
+    price = last["close"]
+    lookback = candles[-65:-1]
+    if len(lookback) < 12:
+        return "NEUTRAL", "-", None, "NONE"
 
-    avg_range = sum(c["high"] - c["low"] for c in lookback) / len(lookback)
-    if avg_range <= 0:
-        avg_range = price * 0.001
-    threshold = avg_range * 1.2
+    avg_range = _calc_avg_range(lookback, 25)
+    zone_tol = avg_range * 0.55
 
     swing_highs, swing_lows = [], []
-    for i in range(2, len(lookback) - 2):
+    for i in range(2, len(lookback) - 3):
         h, l = lookback[i]["high"], lookback[i]["low"]
         if h >= lookback[i - 1]["high"] and h >= lookback[i - 2]["high"] and h > lookback[i + 1]["high"] and h > lookback[i + 2]["high"]:
             swing_highs.append((i, h))
         if l <= lookback[i - 1]["low"] and l <= lookback[i - 2]["low"] and l < lookback[i + 1]["low"] and l < lookback[i + 2]["low"]:
             swing_lows.append((i, l))
 
+    # Cek RBS (Resistance Become Support)
     for idx, res_level in reversed(swing_highs):
-        if any(lookback[k]["close"] > res_level for k in range(idx + 2, len(lookback))):
-            if abs(price - res_level) <= threshold and price >= res_level - (threshold * 0.5):
-                return "BUY", "RBS", res_level
+        break_bars = [k for k in range(idx + 1, len(lookback)) if lookback[k]["close"] > res_level]
+        if not break_bars:
+            continue
+        first_break = break_bars[0]
+        # Pastikan tidak jebol balik ke bawah secara permanen
+        broken_back = any(lookback[k]["close"] < res_level - zone_tol for k in range(first_break + 1, len(lookback)))
+        if broken_back:
+            continue
 
+        # Cek apakah sudah retest & reject di level res_level
+        retested = (last["low"] <= res_level + zone_tol) or (prev_c["low"] <= res_level + zone_tol)
+        rejected = price > res_level and (last["close"] > last["open"] or (last["close"] - last["low"]) > (last["high"] - last["close"]))
+        if retested and rejected and abs(price - res_level) <= avg_range * 1.3:
+            return "BUY", "RBS", res_level, "CONFIRMED"
+
+        # Jika baru breakout dalam 3 candle terakhir & harga belum jauh -> tandai fase BREAKOUT
+        if first_break >= len(lookback) - 3 and price > res_level:
+            return "NEUTRAL", "RBS", res_level, "BREAKOUT_WAIT_RETEST"
+
+    # Cek SBR (Support Become Resistance)
     for idx, sup_level in reversed(swing_lows):
-        if any(lookback[k]["close"] < sup_level for k in range(idx + 2, len(lookback))):
-            if abs(price - sup_level) <= threshold and price <= sup_level + (threshold * 0.5):
-                return "SELL", "SBR", sup_level
+        break_bars = [k for k in range(idx + 1, len(lookback)) if lookback[k]["close"] < sup_level]
+        if not break_bars:
+            continue
+        first_break = break_bars[0]
+        broken_back = any(lookback[k]["close"] > sup_level + zone_tol for k in range(first_break + 1, len(lookback)))
+        if broken_back:
+            continue
 
-    return "NEUTRAL", "-", None
+        retested = (last["high"] >= sup_level - zone_tol) or (prev_c["high"] >= sup_level - zone_tol)
+        rejected = price < sup_level and (last["close"] < last["open"] or (last["high"] - last["close"]) > (last["close"] - last["low"]))
+        if retested and rejected and abs(sup_level - price) <= avg_range * 1.3:
+            return "SELL", "SBR", sup_level, "CONFIRMED"
+
+        if first_break >= len(lookback) - 3 and price < sup_level:
+            return "NEUTRAL", "SBR", sup_level, "BREAKOUT_WAIT_RETEST"
+
+    return "NEUTRAL", "-", None, "NONE"
 
 
 def detect_snd(candles):
-    recent = candles[-1]
-    previous = candles[-20:-1]
-    price = recent["close"]
-    demand = supply = None
+    """
+    6. Supply & Demand (SND) Segar (Unmitigated):
+    Hanya mengambil zona Demand/Supply segar yang belum pernah dijebol close berikutnya
+    dan sedang disentuh oleh harga berjalan.
+    """
+    price = candles[-1]["close"]
+    last_low = candles[-1]["low"]
+    last_high = candles[-1]["high"]
+    lookback = candles[-45:-1]
+    avg_range = _calc_avg_range(lookback, 25)
+    buffer = avg_range * 0.35
 
-    for i in range(1, len(previous)):
-        cur, bef = previous[i], previous[i - 1]
+    for i in range(len(lookback) - 2, 1, -1):
+        cur = lookback[i]
+        bef = lookback[i - 1]
         rng = cur["high"] - cur["low"]
         if rng <= 0:
             continue
         body = abs(cur["close"] - cur["open"])
-        if cur["close"] > cur["open"] and body >= rng * 0.65 and cur["close"] > bef["high"]:
-            demand = cur["low"]
-        if cur["close"] < cur["open"] and body >= rng * 0.65 and cur["close"] < bef["low"]:
-            supply = cur["high"]
 
-    cur_rng = max(recent["high"] - recent["low"], price * 0.0001)
-    if demand is not None and demand <= price <= demand + cur_rng * 2:
-        return "BUY", demand
-    if supply is not None and supply - cur_rng * 2 <= price <= supply:
-        return "SELL", supply
-    return "NEUTRAL", None
+        # Fresh Demand Base
+        if cur["close"] > cur["open"] and body >= rng * 0.60 and cur["close"] > bef["high"]:
+            d_low = bef["low"]
+            d_high = max(bef["high"], cur["open"])
+            broken = any(lookback[k]["close"] < d_low - buffer for k in range(i + 1, len(lookback)))
+            if not broken and ((d_low - buffer <= price <= d_high + buffer) or (last_low <= d_high and price >= d_low)):
+                return "BUY", d_low, d_high
+
+        # Fresh Supply Base
+        if cur["close"] < cur["open"] and body >= rng * 0.60 and cur["close"] < bef["low"]:
+            s_low = min(bef["low"], cur["open"])
+            s_high = bef["high"]
+            broken = any(lookback[k]["close"] > s_high + buffer for k in range(i + 1, len(lookback)))
+            if not broken and ((s_low - buffer <= price <= s_high + buffer) or (last_high >= s_low and price <= s_high)):
+                return "SELL", s_low, s_high
+
+    return "NEUTRAL", None, None
 
 
 def detect_rbr_dbd(candles):
-    recent = candles[-1]
-    price = recent["close"]
-    lookback = candles[-50:-1]
-    if len(lookback) < 8:
+    """
+    7. RBR (Rally-Base-Rally) & DBD (Drop-Base-Drop) Realistis (1-4 Candle Base):
+    - DBD: Candle turun panjang -> 1 s/d 4 candle base (koreksi kecil/naik tipis) -> candle turun panjang menembus base.
+    - RBR: Candle naik panjang -> 1 s/d 4 candle base (koreksi kecil/turun tipis) -> candle naik panjang menembus base.
+    - Hanya zona segar (unmitigated) yang belum pernah dijebol close berikutnya.
+    """
+    last = candles[-1]
+    price = last["close"]
+    lookback = candles[-65:-1]
+    if len(lookback) < 10:
         return "NEUTRAL", "-", None, None
 
-    avg_range = sum(c["high"] - c["low"] for c in lookback) / len(lookback)
-    if avg_range <= 0:
-        avg_range = price * 0.001
-    buffer = avg_range * 0.65
+    avg_range = _calc_avg_range(lookback, 25)
+    buffer = avg_range * 0.45
 
-    def is_strong_bull(c):
+    def is_impulse_bull(c):
         rng = c["high"] - c["low"]
         body = c["close"] - c["open"]
-        return rng > 0 and body > 0 and (body / rng) >= 0.55
+        return rng > 0 and body > 0 and (body / rng) >= 0.48 and rng >= avg_range * 0.65
 
-    def is_strong_bear(c):
+    def is_impulse_bear(c):
         rng = c["high"] - c["low"]
         body = c["open"] - c["close"]
-        return rng > 0 and body > 0 and (body / rng) >= 0.55
+        return rng > 0 and body > 0 and (body / rng) >= 0.48 and rng >= avg_range * 0.65
 
-    def is_base(c):
+    def is_base_candle(c):
         rng = c["high"] - c["low"]
-        return rng <= 0 or (abs(c["close"] - c["open"]) / rng) <= 0.50
+        body = abs(c["close"] - c["open"])
+        return rng <= avg_range * 1.25 and (rng <= 0 or (body / rng) <= 0.65)
 
-    for i in range(len(lookback) - 4, -1, -1):
+    for i in range(len(lookback) - 3, 1, -1):
         leg1 = lookback[i]
-        for base_len in (1, 2):
+        for base_len in (1, 2, 3, 4):
             leg2_idx = i + base_len + 1
             if leg2_idx >= len(lookback):
                 continue
-            base_candles = lookback[i + 1: leg2_idx]
+
+            base_slice = lookback[i + 1: leg2_idx]
             leg2 = lookback[leg2_idx]
-            if not all(is_base(bc) for bc in base_candles):
+
+            if not all(is_base_candle(bc) for bc in base_slice):
                 continue
 
-            z_low = min(bc["low"] for bc in base_candles)
-            z_high = max(bc["high"] for bc in base_candles)
+            z_low = min(bc["low"] for bc in base_slice)
+            z_high = max(bc["high"] for bc in base_slice)
 
-            if is_strong_bull(leg1) and is_strong_bull(leg2) and leg2["close"] > z_high:
-                inv = any(lookback[k]["close"] < z_low - buffer for k in range(leg2_idx + 1, len(lookback)))
-                if not inv and (z_low - buffer <= price <= z_high + buffer):
-                    return "BUY", "RBR", z_low, z_high
+            # RBR: Rally -> Base (1-4 candle) -> Rally menembus z_high
+            if is_impulse_bull(leg1) and is_impulse_bull(leg2) and leg2["close"] > z_high:
+                invalidated = any(lookback[k]["close"] < z_low - buffer for k in range(leg2_idx + 1, len(lookback)))
+                if not invalidated:
+                    in_zone = (z_low - buffer <= price <= z_high + buffer) or (last["low"] <= z_high and price >= z_low - buffer)
+                    if in_zone:
+                        return "BUY", "RBR", z_low, z_high
 
-            if is_strong_bear(leg1) and is_strong_bear(leg2) and leg2["close"] < z_low:
-                inv = any(lookback[k]["close"] > z_high + buffer for k in range(leg2_idx + 1, len(lookback)))
-                if not inv and (z_low - buffer <= price <= z_high + buffer):
-                    return "SELL", "DBD", z_low, z_high
+            # DBD: Drop -> Base (1-4 candle) -> Drop menembus z_low
+            if is_impulse_bear(leg1) and is_impulse_bear(leg2) and leg2["close"] < z_low:
+                invalidated = any(lookback[k]["close"] > z_high + buffer for k in range(leg2_idx + 1, len(lookback)))
+                if not invalidated:
+                    in_zone = (z_low - buffer <= price <= z_high + buffer) or (last["high"] >= z_low and price <= z_high + buffer)
+                    if in_zone:
+                        return "SELL", "DBD", z_low, z_high
 
     return "NEUTRAL", "-", None, None
 
 
 # ============================================================
-# SINGLE TIMEFRAME ANALYSIS & LOT CALCULATOR
+# SINYAL PENDING LIMIT DEKAT HARGA (SELL LIMIT & BUY LIMIT)
+# ============================================================
+
+def find_tight_pending_limits(candles):
+    """
+    Mencari zona segar terdekat di atas harga (SELL LIMIT) dan di bawah harga (BUY LIMIT)
+    dengan jarak pip terbatas (maksimal 4x avg_range) agar realistis cepat dijemput.
+    """
+    price = candles[-1]["close"]
+    lookback = candles[-70:-1]
+    avg_range = _calc_avg_range(candles, 20)
+
+    min_dist = avg_range * 0.45
+    max_dist = avg_range * 4.00
+
+    sell_candidates = []
+    buy_candidates = []
+
+    # 1. Kandidat dari Unmitigated OB & Unmitigated Base (RBR/DBD) dalam jarak 0.45x - 4x avg_range
+    for i in range(len(lookback) - 2, 2, -1):
+        c = lookback[i]
+        c1 = lookback[i + 1]
+
+        # Zona Atas (Bearish OB / Supply Base) -> SELL LIMIT
+        if c["close"] > c["open"] and c1["close"] < c["low"]:
+            z_low, z_high = c["low"], c["high"]
+            dist = z_low - price
+            if min_dist <= dist <= max_dist:
+                mitigated = any(lookback[k]["close"] > z_high for k in range(i + 2, len(lookback)))
+                if not mitigated:
+                    sell_candidates.append((dist, "Fresh Bearish OB", z_low, z_high))
+
+        # Zona Bawah (Bullish OB / Demand Base) -> BUY LIMIT
+        if c["close"] < c["open"] and c1["close"] > c["high"]:
+            z_low, z_high = c["low"], c["high"]
+            dist = price - z_high
+            if min_dist <= dist <= max_dist:
+                mitigated = any(lookback[k]["close"] < z_low for k in range(i + 2, len(lookback)))
+                if not mitigated:
+                    buy_candidates.append((dist, "Fresh Bullish OB", z_low, z_high))
+
+    # 2. Kandidat dari Unmitigated FVG dalam jarak dekat
+    for i in range(len(lookback) - 1, 2, -1):
+        c1 = lookback[i - 2]
+        c3 = lookback[i]
+        if c3["high"] < c1["low"]:
+            g_low, g_high = c3["high"], c1["low"]
+            dist = g_low - price
+            if min_dist <= dist <= max_dist:
+                filled = any(lookback[k]["close"] > g_high for k in range(i + 1, len(lookback)))
+                if not filled:
+                    sell_candidates.append((dist, "Fresh Bearish FVG", g_low, g_high))
+
+        if c3["low"] > c1["high"]:
+            g_low, g_high = c1["high"], c3["low"]
+            dist = price - g_high
+            if min_dist <= dist <= max_dist:
+                filled = any(lookback[k]["close"] < g_low for k in range(i + 1, len(lookback)))
+                if not filled:
+                    buy_candidates.append((dist, "Fresh Bullish FVG", g_low, g_high))
+
+    # Pilih kandidat terdekat yang paling cepat dijemput
+    if sell_candidates:
+        sell_candidates.sort(key=lambda x: x[0])
+        _, s_label, s_low, s_high = sell_candidates[0]
+    else:
+        # Fallback terdekat dari swing high dalam 25 candle terakhir (di-clamp maks 3.5x avg_range)
+        recent_high = max(c["high"] for c in lookback[-25:])
+        target_high = min(recent_high, price + avg_range * 3.2)
+        if target_high <= price + min_dist:
+            target_high = price + avg_range * 1.4
+        s_label = "Nearest Supply / Swing High"
+        s_low = target_high - avg_range * 0.20
+        s_high = target_high
+
+    s_entry = round((s_low + s_high) / 2.0, 4)
+    s_sl = s_high + avg_range * 0.90
+    s_risk = max(s_sl - s_entry, avg_range * 0.5)
+    sell_limit = {
+        "label": s_label,
+        "entry": s_entry,
+        "zone_low": s_low,
+        "zone_high": s_high,
+        "sl": s_sl,
+        "tp1": s_entry - s_risk * 1.5,
+        "tp2": s_entry - s_risk * 2.5,
+        "tp3": s_entry - s_risk * 3.5
+    }
+
+    if buy_candidates:
+        buy_candidates.sort(key=lambda x: x[0])
+        _, b_label, b_low, b_high = buy_candidates[0]
+    else:
+        recent_low = min(c["low"] for c in lookback[-25:])
+        target_low = max(recent_low, price - avg_range * 3.2)
+        if target_low >= price - min_dist:
+            target_low = price - avg_range * 1.4
+        b_label = "Nearest Demand / Swing Low"
+        b_low = target_low
+        b_high = target_low + avg_range * 0.20
+
+    b_entry = round((b_low + b_high) / 2.0, 4)
+    b_sl = b_low - avg_range * 0.90
+    b_risk = max(b_entry - b_sl, avg_range * 0.5)
+    buy_limit = {
+        "label": b_label,
+        "entry": b_entry,
+        "zone_low": b_low,
+        "zone_high": b_high,
+        "sl": b_sl,
+        "tp1": b_entry + b_risk * 1.5,
+        "tp2": b_entry + b_risk * 2.5,
+        "tp3": b_entry + b_risk * 3.5
+    }
+
+    return sell_limit, buy_limit
+
+
+# ============================================================
+# KALKULATOR LOT & ANALISA SINGLE TIMEFRAME
 # ============================================================
 
 def calculate_lot_recommendation(symbol, balance, risk_pct, entry_price, sl_price):
@@ -528,11 +665,11 @@ def analyze_market(symbol, timeframe):
     fvg, fvg_low, fvg_high = detect_fvg(candles)
     bos = detect_bos(candles)
     snr, snr_level = detect_snr(candles)
-    sbr_rbs, sbr_rbs_type, sbr_rbs_level = detect_sbr_rbs(candles)
-    snd, snd_level = detect_snd(candles)
+    sbr_rbs, sbr_rbs_type, sbr_rbs_level, sbr_rbs_phase = detect_sbr_rbs(candles)
+    snd, snd_low, snd_high = detect_snd(candles)
     rbr_dbd, rbr_dbd_type, rbr_dbd_low, rbr_dbd_high = detect_rbr_dbd(candles)
     sweep_dir, sweep_desc = detect_liquidity_sweep(candles)
-    sell_limit_zone, buy_limit_zone = find_pending_limit_zones(candles)
+    sell_limit, buy_limit = find_tight_pending_limits(candles)
     session_info, limit_safe, limit_note = get_session_killzone_info(symbol)
 
     signals = {
@@ -559,21 +696,18 @@ def analyze_market(symbol, timeframe):
         confirmations = max(buy_votes, sell_votes)
 
     if direction == "WAIT" or confirmations < 3:
-        status = "BELUM ADA SETUP KUAT"
+        status = "BELUM ADA SETUP INSTAN KUAT"
     elif confirmations in (3, 4):
         status = "KUAT"
     else:
         status = "SANGAT KUAT"
 
-    recent = candles[-14:]
-    avg_range = sum(c["high"] - c["low"] for c in recent) / len(recent)
-    if avg_range <= 0:
-        avg_range = price * 0.001
+    avg_range = _calc_avg_range(candles, 14)
 
     if direction == "BUY":
         entry_low = price
         entry_high = price + avg_range * 0.20
-        sl = price - avg_range * 1.5
+        sl = price - avg_range * 1.4
         risk = entry_high - sl
         tp1 = entry_high + risk
         tp2 = entry_high + risk * 2
@@ -581,7 +715,7 @@ def analyze_market(symbol, timeframe):
     elif direction == "SELL":
         entry_low = price - avg_range * 0.20
         entry_high = price
-        sl = price + avg_range * 1.5
+        sl = price + avg_range * 1.4
         risk = sl - entry_low
         tp1 = entry_low - risk
         tp2 = entry_low - risk * 2
@@ -609,8 +743,14 @@ def analyze_market(symbol, timeframe):
         "ob_type": ob_type,
         "ob_low": ob_low,
         "ob_high": ob_high,
+        "fvg_low": fvg_low,
+        "fvg_high": fvg_high,
+        "snr_level": snr_level,
         "sbr_rbs_type": sbr_rbs_type,
         "sbr_rbs_level": sbr_rbs_level,
+        "sbr_rbs_phase": sbr_rbs_phase,
+        "snd_low": snd_low,
+        "snd_high": snd_high,
         "rbr_dbd_type": rbr_dbd_type,
         "rbr_dbd_low": rbr_dbd_low,
         "rbr_dbd_high": rbr_dbd_high,
@@ -619,36 +759,46 @@ def analyze_market(symbol, timeframe):
         "limit_note": limit_note,
         "sweep_dir": sweep_dir,
         "sweep_desc": sweep_desc,
-        "sell_limit_zone": sell_limit_zone,
-        "buy_limit_zone": buy_limit_zone
+        "sell_limit": sell_limit,
+        "buy_limit": buy_limit
     }
 
 
-def _format_limit_zones_block(result, risk_profile=None):
-    slz = result.get("sell_limit_zone")
-    blz = result.get("buy_limit_zone")
+def _format_pending_limits_section(result, risk_profile=None):
+    sl_ord = result["sell_limit"]
+    bl_ord = result["buy_limit"]
     badge = "✅" if result.get("limit_safe") else "⚠️"
+    sym = result["symbol"]
 
-    lines = [
+    sell_lot_txt = ""
+    buy_lot_txt = ""
+    if risk_profile:
+        s_lot = calculate_lot_recommendation(
+            sym, risk_profile.get("balance"), risk_profile.get("risk_pct"),
+            sl_ord["entry"], sl_ord["sl"]
+        )
+        b_lot = calculate_lot_recommendation(
+            sym, risk_profile.get("balance"), risk_profile.get("risk_pct"),
+            bl_ord["entry"], bl_ord["sl"]
+        )
+        if s_lot:
+            sell_lot_txt = f" | Lot: {s_lot['lot']:.2f}"
+        if b_lot:
+            buy_lot_txt = f" | Lot: {b_lot['lot']:.2f}"
+
+    return [
         "",
-        f"🎣 ZONA JEMPUTAN (PENDING LIMIT)",
-        f"Status Limit: {badge} {result.get('limit_note', '-')}"
+        f"🎯 SINYAL PENDING ORDER (JEMPUTAN — {result['timeframe']})",
+        f"Status Sesi: {badge} {result.get('limit_note', '-')}",
+        "",
+        f"🔴 SELL LIMIT @ {format_price(sl_ord['entry'])} ({sl_ord['label']})",
+        f"   Zona: {format_price(sl_ord['zone_low'])} - {format_price(sl_ord['zone_high'])}{sell_lot_txt}",
+        f"   SL: {format_price(sl_ord['sl'])} | TP1: {format_price(sl_ord['tp1'])} | TP2: {format_price(sl_ord['tp2'])}",
+        "",
+        f"🟢 BUY LIMIT @ {format_price(bl_ord['entry'])} ({bl_ord['label']})",
+        f"   Zona: {format_price(bl_ord['zone_low'])} - {format_price(bl_ord['zone_high'])}{buy_lot_txt}",
+        f"   SL: {format_price(bl_ord['sl'])} | TP1: {format_price(bl_ord['tp1'])} | TP2: {format_price(bl_ord['tp2'])}"
     ]
-
-    if slz:
-        lines.append(
-            f"🔴 SELL LIMIT ({slz['label']}): "
-            f"{format_price(slz['entry_low'])} - {format_price(slz['entry_high'])} "
-            f"| SL: {format_price(slz['sl'])} | TP1: {format_price(slz['tp1'])}"
-        )
-    if blz:
-        lines.append(
-            f"🟢 BUY LIMIT ({blz['label']}): "
-            f"{format_price(blz['entry_low'])} - {format_price(blz['entry_high'])} "
-            f"| SL: {format_price(blz['sl'])} | TP1: {format_price(blz['tp1'])}"
-        )
-
-    return lines
 
 
 def create_report(result, risk_profile=None, title_prefix="📊 ANALISA SMC SCALPING PRO"):
@@ -656,27 +806,48 @@ def create_report(result, risk_profile=None, title_prefix="📊 ANALISA SMC SCAL
     emoji = {"BUY": "🟢", "SELL": "🔴", "WAIT": "⚪"}.get(direction, "⚪")
 
     ob_sig = result["signals"]["OB"]
-    if ob_sig != "NEUTRAL" and result["ob_low"] is not None:
-        ob_text = f"{ob_sig} ({result['ob_type']} @ {format_price(result['ob_low'])} - {format_price(result['ob_high'])})"
-    else:
-        ob_text = ob_sig
+    ob_text = (
+        f"{ob_sig} ({result['ob_type']} @ {format_price(result['ob_low'])} - {format_price(result['ob_high'])})"
+        if ob_sig != "NEUTRAL" and result["ob_low"] is not None else "NEUTRAL (Belum menyentuh OB segar)"
+    )
+
+    fvg_sig = result["signals"]["FVG"]
+    fvg_text = (
+        f"{fvg_sig} (@ {format_price(result['fvg_low'])} - {format_price(result['fvg_high'])})"
+        if fvg_sig != "NEUTRAL" and result["fvg_low"] is not None else "NEUTRAL (Belum di zona FVG segar)"
+    )
+
+    snr_sig = result["signals"]["SNR"]
+    snr_text = (
+        f"{snr_sig} (Reject @ {format_price(result['snr_level'])})"
+        if snr_sig != "NEUTRAL" and result["snr_level"] is not None else "NEUTRAL"
+    )
 
     sbr_sig = result["signals"]["SBR_RBS"]
+    sbr_phase = result.get("sbr_rbs_phase", "NONE")
     if sbr_sig != "NEUTRAL" and result["sbr_rbs_level"] is not None:
-        sbr_text = f"{sbr_sig} ({result['sbr_rbs_type']} @ {format_price(result['sbr_rbs_level'])})"
+        sbr_text = f"✅ {sbr_sig} — BREAKOUT → RETEST → REJECT ({result['sbr_rbs_type']} @ {format_price(result['sbr_rbs_level'])})"
+    elif sbr_phase == "BREAKOUT_WAIT_RETEST" and result["sbr_rbs_level"] is not None:
+        sbr_text = f"⏳ BREAKOUT {result['sbr_rbs_type']} @ {format_price(result['sbr_rbs_level'])} (Tunggu Retest)"
     else:
-        sbr_text = sbr_sig
+        sbr_text = "NEUTRAL"
+
+    snd_sig = result["signals"]["SND"]
+    snd_text = (
+        f"{snd_sig} (@ {format_price(result['snd_low'])} - {format_price(result['snd_high'])})"
+        if snd_sig != "NEUTRAL" and result["snd_low"] is not None else "NEUTRAL"
+    )
 
     rbr_sig = result["signals"]["RBR_DBD"]
-    if rbr_sig != "NEUTRAL" and result["rbr_dbd_low"] is not None:
-        rbr_text = f"{rbr_sig} ({result['rbr_dbd_type']} @ {format_price(result['rbr_dbd_low'])} - {format_price(result['rbr_dbd_high'])})"
-    else:
-        rbr_text = rbr_sig
+    rbr_text = (
+        f"{rbr_sig} ({result['rbr_dbd_type']} Base @ {format_price(result['rbr_dbd_low'])} - {format_price(result['rbr_dbd_high'])})"
+        if rbr_sig != "NEUTRAL" and result["rbr_dbd_low"] is not None else "NEUTRAL"
+    )
 
     lines = [
         title_prefix,
         "━━━━━━━━━━━━━━━━━━",
-        f"Market: {result['symbol']} | TF: {result['timeframe']}",
+        f"Market: {result['symbol']} | TF: {result['timeframe']} (Independen)",
         f"Harga: {format_price(result['price'])}",
         f"Sesi: {result['session_info']}",
         f"Likuiditas: {result['sweep_desc']}",
@@ -685,12 +856,12 @@ def create_report(result, risk_profile=None, title_prefix="📊 ANALISA SMC SCAL
         f"Status: {result['status']} ({result['confirmations']}/{result['total_indicators']} Konfirmasi)",
         "",
         "📌 KONFIRMASI SMC & PRICE ACTION",
-        f"• OB Valid: {ob_text}",
-        f"• FVG: {result['signals']['FVG']}",
+        f"• OB Segar: {ob_text}",
+        f"• FVG Segar: {fvg_text}",
         f"• BOS: {result['signals']['BOS']}",
-        f"• SNR: {result['signals']['SNR']}",
+        f"• SNR: {snr_text}",
         f"• SBR/RBS: {sbr_text}",
-        f"• SND: {result['signals']['SND']}",
+        f"• SND Segar: {snd_text}",
         f"• RBR/DBD: {rbr_text}"
     ]
 
@@ -698,12 +869,10 @@ def create_report(result, risk_profile=None, title_prefix="📊 ANALISA SMC SCAL
         entry_mid = (result["entry_low"] + result["entry_high"]) / 2.0
         lines.extend([
             "",
-            "🎯 RENCANA ENTRY INSTAN",
+            "⚡ EKSEKUSI INSTAN (MARKET ORDER)",
             f"• Entry: {format_price(result['entry_low'])} - {format_price(result['entry_high'])}",
             f"• Stop Loss: {format_price(result['sl'])}",
-            f"• TP1: {format_price(result['tp1'])}",
-            f"• TP2: {format_price(result['tp2'])}",
-            f"• TP3: {format_price(result['tp3'])}"
+            f"• TP1: {format_price(result['tp1'])} | TP2: {format_price(result['tp2'])} | TP3: {format_price(result['tp3'])}"
         ])
 
         if risk_profile:
@@ -715,44 +884,44 @@ def create_report(result, risk_profile=None, title_prefix="📊 ANALISA SMC SCAL
                 result["sl"]
             )
             if lot_info:
-                lines.extend([
-                    "",
-                    f"💼 KALKULATOR LOT (Modal ${lot_info['balance']:,.0f} | Risk {lot_info['risk_pct']:.1f}%)",
-                    f"• Ukuran Lot: {lot_info['lot']:.2f} Lot",
-                    f"• Est. Risiko SL: -${lot_info['actual_loss']:,.2f} | Target TP2: +${lot_info['tp2_profit']:,.2f}"
-                ])
+                lines.append(
+                    f"💼 Lot Instan (${lot_info['balance']:,.0f} | Risk {lot_info['risk_pct']:.1f}%): "
+                    f"{lot_info['lot']:.2f} Lot (SL -${lot_info['actual_loss']:,.2f})"
+                )
 
-    # Tambahkan Zona Jemputan (Pending Limit) di setiap laporan
-    lines.extend(_format_limit_zones_block(result, risk_profile))
+    lines.extend(_format_pending_limits_section(result, risk_profile))
 
     lines.extend([
         "",
         "━━━━━━━━━━━━━━━━━━",
-        "Hapus pending limit menjelang buka sesi London/NY & rilis berita besar US."
+        "Hapus pending limit menjelang buka sesi London/NY & rilis news US."
     ])
 
     return "\n".join(lines)
 
 
 # ============================================================
-# MULTI-TIMEFRAME CONFLUENCE PRO (H4 + H1 + M15 + M5)
+# MULTI-TIMEFRAME CONFLUENCE PRO (6 TF: H4 + H1 + M30 + M15 + M5 + M1)
 # ============================================================
 
 def analyze_confluence_pro(symbol, risk_profile=None):
     res_h4 = analyze_market(symbol, "H4")
     res_h1 = analyze_market(symbol, "H1")
+    res_m30 = analyze_market(symbol, "M30")
     res_m15 = analyze_market(symbol, "M15")
     res_m5 = analyze_market(symbol, "M5")
+    res_m1 = analyze_market(symbol, "M1")
 
-    dirs = [res_h4["direction"], res_h1["direction"], res_m15["direction"], res_m5["direction"]]
+    all_res = [res_h4, res_h1, res_m30, res_m15, res_m5, res_m1]
+    dirs = [r["direction"] for r in all_res]
     buy_tf = dirs.count("BUY")
     sell_tf = dirs.count("SELL")
     scalp_dirs = [res_h1["direction"], res_m15["direction"], res_m5["direction"]]
 
-    if buy_tf == 4:
-        verdict = "🟢 PERFECT BUY CONFLUENCE (4/4 TF SEARAH BULLISH)"
-    elif sell_tf == 4:
-        verdict = "🔴 PERFECT SELL CONFLUENCE (4/4 TF SEARAH BEARISH)"
+    if buy_tf >= 5:
+        verdict = f"🟢 STRONG BULLISH CONFLUENCE ({buy_tf}/6 TF SEARAH BUY)"
+    elif sell_tf >= 5:
+        verdict = f"🔴 STRONG BEARISH CONFLUENCE ({sell_tf}/6 TF SEARAH SELL)"
     elif scalp_dirs == ["BUY", "BUY", "BUY"]:
         verdict = "⚡ HIGH PROBABILITY SCALP BUY (H1 + M15 + M5 Searah)"
     elif scalp_dirs == ["SELL", "SELL", "SELL"]:
@@ -760,7 +929,7 @@ def analyze_confluence_pro(symbol, risk_profile=None):
     elif res_h4["direction"] in ("BUY", "SELL") and res_m5["direction"] in ("BUY", "SELL") and res_h4["direction"] != res_m5["direction"]:
         verdict = f"⚠️ COUNTER-TREND RISK (M5 {res_m5['direction']} melawan tren H4 {res_h4['direction']})"
     else:
-        verdict = "⚪ BELUM ADA KESELARASAN KUAT (Gunakan Zona Jemputan Limit)"
+        verdict = "⚪ BELUM ADA KESELARASAN KUAT (Gunakan Sinyal Pending Limit)"
 
     def badge(r):
         ic = {"BUY": "🟢", "SELL": "🔴", "WAIT": "⚪"}.get(r["direction"], "⚪")
@@ -769,15 +938,17 @@ def analyze_confluence_pro(symbol, risk_profile=None):
     lines = [
         f"⚡ ANALISA CONFLUENCE PRO — {symbol}",
         "━━━━━━━━━━━━━━━━━━",
-        f"Harga Saat Ini: {format_price(res_m5['price'])}",
-        f"Sesi: {res_m5['session_info']}",
+        f"Harga Saat Ini: {format_price(res_m1['price'])}",
+        f"Sesi: {res_m1['session_info']}",
         f"Likuiditas M5: {res_m5['sweep_desc']}",
         "",
-        "🧭 MATRIKS 4 TIMEFRAME (H4 • H1 • M15 • M5)",
-        f"• H4 (Tren Utama): {badge(res_h4)}",
-        f"• H1 (Struktur Intraday): {badge(res_h1)}",
+        "🧭 MATRIKS 6 TIMEFRAME (H4 • H1 • M30 • M15 • M5 • M1)",
+        f"• H4  (Tren Besar): {badge(res_h4)}",
+        f"• H1  (Struktur Intraday): {badge(res_h1)}",
+        f"• M30 (Transisi Sesi): {badge(res_m30)}",
         f"• M15 (Zona Setup): {badge(res_m15)}",
-        f"• M5 (Trigger Scalping): {badge(res_m5)}",
+        f"• M5  (Konfirmasi Entry): {badge(res_m5)}",
+        f"• M1  (Mikro Trigger): {badge(res_m1)}",
         "",
         "🏆 KESIMPULAN CONFLUENCE",
         verdict
@@ -790,7 +961,7 @@ def analyze_confluence_pro(symbol, risk_profile=None):
         entry_mid = (exec_res["entry_low"] + exec_res["entry_high"]) / 2.0
         lines.extend([
             "",
-            f"🎯 RENCANA EKSEKUSI INSTAN ({exec_res['timeframe']} — {exec_res['direction']})",
+            f"⚡ EKSEKUSI INSTAN ({exec_res['timeframe']} — {exec_res['direction']})",
             f"• Entry: {format_price(exec_res['entry_low'])} - {format_price(exec_res['entry_high'])}",
             f"• Stop Loss: {format_price(exec_res['sl'])}",
             f"• TP1: {format_price(exec_res['tp1'])} | TP2: {format_price(exec_res['tp2'])} | TP3: {format_price(exec_res['tp3'])}"
@@ -806,17 +977,17 @@ def analyze_confluence_pro(symbol, risk_profile=None):
             )
             if lot_info:
                 lines.append(
-                    f"💼 Lot Rekomendasi (${lot_info['balance']:,.0f} | {lot_info['risk_pct']:.1f}%): "
+                    f"💼 Lot Instan (${lot_info['balance']:,.0f} | {lot_info['risk_pct']:.1f}%): "
                     f"{lot_info['lot']:.2f} Lot (SL -${lot_info['actual_loss']:,.2f})"
                 )
 
-    # Zona Jemputan dari M15 agar presisi untuk Limit Order
-    lines.extend(_format_limit_zones_block(res_m15, risk_profile))
+    # Sinyal Pending Limit dari M15
+    lines.extend(_format_pending_limits_section(res_m15, risk_profile))
 
     lines.extend([
         "",
         "━━━━━━━━━━━━━━━━━━",
-        "Kombinasi terbaik: H4/H1 untuk arah tren, M15/M5 untuk presisi entry."
+        "Kombinasi terbaik: H4/H1 untuk arah tren, M15/M5/M1 untuk presisi entry."
     ])
 
     return "\n".join(lines)
