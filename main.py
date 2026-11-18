@@ -5,15 +5,11 @@
 # XAUUSD + BTCUSD
 # TELEGRAM + BIQUOTE + GITHUB ACTIONS
 #
-# ANALYSIS:
-# LAST 100 CLOSED CANDLES
+# 100 CANDLE TERAKHIR YANG SUDAH TERTUTUP
 # FVG + SNR + SND + BOS
-# 4 CONFIRMATIONS
-#
-# TIMEFRAMES:
-# M1 M5 M15 M30 H1 H4
-#
 # MANUAL ANALYSIS ONLY
+#
+# TIMEFRAMES: M1 M5 M15 M30 H1 H4
 # ============================================================
 
 import os
@@ -23,11 +19,13 @@ import asyncio
 import requests
 
 from datetime import datetime, timezone
+
 from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup
 )
+
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -43,10 +41,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
 BASE_URL = "https://biquote.io"
 
-MARKETS = {
-    "XAUUSD": "XAUUSD",
-    "BTCUSD": "BTCUSD"
-}
+MARKETS = ["XAUUSD", "BTCUSD"]
 
 TIMEFRAMES = {
     "M1": "1m",
@@ -58,11 +53,8 @@ TIMEFRAMES = {
 }
 
 CANDLE_COUNT = 100
-FETCH_COUNT = 120
-
-MIN_CONFIRMATIONS = 3
-
-REQUEST_TIMEOUT = 20
+FETCH_COUNT = 150
+REQUEST_TIMEOUT = 25
 
 # ============================================================
 # LOGGING
@@ -77,100 +69,16 @@ logging.basicConfig(
 log = logging.getLogger("SMC_BOT")
 
 # ============================================================
-# HTTP SESSION
+# HTTP
 # ============================================================
 
 SESSION = requests.Session()
 
 SESSION.headers.update({
-    "User-Agent": "Mozilla/5.0 SMC-Trading-Bot/1.0",
+    "User-Agent": "Mozilla/5.0 SMC-Bot/2.0",
     "Accept": "application/json"
 })
 
-# ============================================================
-# TELEGRAM MENU
-# ============================================================
-
-def main_menu():
-
-    keyboard = [
-        [
-            InlineKeyboardButton("🥇 XAUUSD", callback_data="market_XAUUSD"),
-            InlineKeyboardButton("₿ BTCUSD", callback_data="market_BTCUSD")
-        ],
-        [
-            InlineKeyboardButton("📅 Kalender Ekonomi", callback_data="calendar"),
-            InlineKeyboardButton("📰 Berita Market", callback_data="news")
-        ],
-        [
-            InlineKeyboardButton("🔄 Refresh Menu", callback_data="menu")
-        ]
-    ]
-
-    return InlineKeyboardMarkup(keyboard)
-
-
-def timeframe_menu(symbol):
-
-    keyboard = []
-
-    row = []
-
-    for tf in TIMEFRAMES:
-
-        row.append(
-            InlineKeyboardButton(
-                tf,
-                callback_data=f"tf_{symbol}_{tf}"
-            )
-        )
-
-        if len(row) == 3:
-            keyboard.append(row)
-            row = []
-
-    if row:
-        keyboard.append(row)
-
-    keyboard.append([
-        InlineKeyboardButton(
-            "⬅️ Kembali",
-            callback_data="menu"
-        )
-    ])
-
-    return InlineKeyboardMarkup(keyboard)
-
-
-def analysis_menu(symbol, timeframe):
-
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "🔍 ANALISA SEKARANG",
-                callback_data=f"analyze_{symbol}_{timeframe}"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "⬅️ Ganti Timeframe",
-                callback_data=f"market_{symbol}"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🏠 Menu Utama",
-                callback_data="menu"
-            )
-        ]
-    ]
-
-    return InlineKeyboardMarkup(keyboard)
-
-
-# ============================================================
-# API REQUEST
-# ============================================================
 
 def api_get(endpoint, params=None):
 
@@ -184,63 +92,72 @@ def api_get(endpoint, params=None):
 
     response.raise_for_status()
 
-    data = response.json()
-
-    if isinstance(data, dict):
-
-        if data.get("success") is False:
-            raise ValueError(
-                str(data.get("message", "API returned success=false"))
-            )
-
-        if data.get("error"):
-            raise ValueError(str(data["error"]))
-
-    return data
+    try:
+        return response.json()
+    except ValueError:
+        raise ValueError(
+            f"Respons API bukan JSON: {response.text[:500]}"
+        )
 
 
 # ============================================================
-# CANDLE PARSER
+# CANDLE DATA PARSER - BIQUOTE
 # ============================================================
 
 def extract_candle_list(data):
 
-    if isinstance(data, list):
-        return data
-
     if not isinstance(data, dict):
-        raise ValueError("Format data candle tidak dikenal")
+        raise ValueError(
+            f"Format respons candle bukan object: {type(data).__name__}"
+        )
 
-    for key in ("data", "candles", "ohlc", "result", "items"):
+    bars = data.get("bars")
 
-        value = data.get(key)
+    if not isinstance(bars, list):
+        raise ValueError(
+            "Properti 'bars' tidak ditemukan. "
+            f"Properti respons: {list(data.keys())}"
+        )
 
-        if isinstance(value, list):
-            return value
+    if not bars:
+        raise ValueError("API mengembalikan bars kosong")
 
-        if isinstance(value, dict):
-
-            for nested in ("candles", "ohlc", "data", "items"):
-                if isinstance(value.get(nested), list):
-                    return value[nested]
-
-    raise ValueError(
-        "Data candle tidak ditemukan dalam respons API"
-    )
+    return bars
 
 
-def number_value(candle, keys):
+def parse_candle_time(value):
 
-    for key in keys:
+    if value is None:
+        raise ValueError("Waktu candle kosong")
 
-        value = candle.get(key)
+    # Format ISO 8601, misalnya:
+    # 2026-11-18T05:30:00Z
+    if isinstance(value, str):
 
-        if value is not None:
-            return float(value)
+        value = value.strip()
 
-    raise ValueError(
-        "Kolom candle tidak ditemukan: " + str(keys)
-    )
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+
+        try:
+            result = datetime.fromisoformat(value)
+
+            if result.tzinfo is None:
+                result = result.replace(tzinfo=timezone.utc)
+
+            return result.timestamp()
+
+        except ValueError:
+            pass
+
+    # Format Unix timestamp
+    number = float(value)
+
+    # Milidetik ke detik
+    if number > 100000000000:
+        number /= 1000
+
+    return number
 
 
 def normalize_candles(raw):
@@ -254,55 +171,81 @@ def normalize_candles(raw):
 
         try:
 
+            required = ["open", "high", "low", "close", "openTime"]
+
+            missing = [
+                key for key in required
+                if item.get(key) is None
+            ]
+
+            if missing:
+                continue
+
             candle = {
-                "open": number_value(item, ["open", "o"]),
-                "high": number_value(item, ["high", "h"]),
-                "low": number_value(item, ["low", "l"]),
-                "close": number_value(item, ["close", "c"]),
-                "time": (
-                    item.get("time")
-                    or item.get("timestamp")
-                    or item.get("date")
-                    or item.get("t")
-                    or 0
-                )
+                "open": float(item["open"]),
+                "high": float(item["high"]),
+                "low": float(item["low"]),
+                "close": float(item["close"]),
+                "time": parse_candle_time(item["openTime"]),
+                "is_open": item.get("isOpen", False)
             }
 
-            is_open = item.get("isOpen")
+            # Validasi OHLC
+            if candle["high"] < candle["low"]:
+                continue
 
-            if is_open is None:
-                is_open = item.get("is_open")
+            if candle["high"] < max(
+                candle["open"], candle["close"]
+            ):
+                continue
 
-            candle["is_open"] = is_open
+            if candle["low"] > min(
+                candle["open"], candle["close"]
+            ):
+                continue
+
+            # Buang candle yang masih terbuka
+            is_open = candle["is_open"]
+
+            if is_open is True:
+                continue
+
+            if str(is_open).lower() in ("true", "1"):
+                continue
 
             candles.append(candle)
 
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, KeyError):
             continue
 
-    # Jika API menyediakan status candle terbuka,
-    # buang candle yang masih berjalan.
-    if any(c["is_open"] is not None for c in candles):
+    if not candles:
+        raise ValueError(
+            "Tidak ada candle valid setelah proses normalisasi"
+        )
 
-        candles = [
-            c for c in candles
-            if c["is_open"] is not True
-            and str(c["is_open"]).lower() != "true"
-            and str(c["is_open"]).lower() != "1"
-        ]
+    # API mengirim newest-first.
+    # Kita urutkan menjadi oldest-first.
+    candles.sort(key=lambda candle: candle["time"])
 
-    # Urutkan dari candle lama ke candle terbaru.
-    try:
-        candles.sort(key=lambda x: float(x["time"]))
-    except (ValueError, TypeError):
-        pass
+    # Hilangkan timestamp duplikat
+    unique = {}
 
-    # Ambil tepat maksimal 100 candle terakhir.
+    for candle in candles:
+        unique[candle["time"]] = candle
+
+    candles = sorted(
+        unique.values(),
+        key=lambda candle: candle["time"]
+    )
+
+    # Ambil tepat 100 candle tertutup paling baru
     candles = candles[-CANDLE_COUNT:]
 
-    if len(candles) < 30:
+    if len(candles) < CANDLE_COUNT:
+
         raise ValueError(
-            f"Candle tidak cukup: hanya {len(candles)} candle tersedia"
+            f"Hanya tersedia {len(candles)} candle tertutup. "
+            f"Dibutuhkan {CANDLE_COUNT} candle."
         )
 
     return candles
@@ -310,9 +253,20 @@ def normalize_candles(raw):
 
 def get_candles(symbol, timeframe):
 
+    if symbol not in MARKETS:
+        raise ValueError("Market tidak valid")
+
+    if timeframe not in TIMEFRAMES:
+        raise ValueError("Timeframe tidak valid")
+
     interval = TIMEFRAMES[timeframe]
 
     endpoint = f"/api/{symbol}/ohlc"
+
+    log.info(
+        "Mengambil candle %s %s interval=%s",
+        symbol, timeframe, interval
+    )
 
     data = api_get(
         endpoint,
@@ -326,16 +280,8 @@ def get_candles(symbol, timeframe):
 
     candles = normalize_candles(raw)
 
-    if len(candles) < CANDLE_COUNT:
-        log.warning(
-            "%s %s hanya memperoleh %s candle",
-            symbol,
-            timeframe,
-            len(candles)
-        )
-
     log.info(
-        "Candle berhasil: %s %s | %s candle",
+        "BERHASIL: %s %s mendapatkan %s candle tertutup",
         symbol,
         timeframe,
         len(candles)
@@ -345,19 +291,12 @@ def get_candles(symbol, timeframe):
 
 
 # ============================================================
-# SMC ANALYSIS
+# SMC: FVG
 # ============================================================
 
 def detect_fvg(candles):
 
-    bullish = False
-    bearish = False
-
-    gap_low = None
-    gap_high = None
-
-    # Periksa FVG terbaru dari 100 candle.
-    for i in range(2, len(candles)):
+    for i in range(len(candles) - 1, 1, -1):
 
         first = candles[i - 2]
         third = candles[i]
@@ -365,34 +304,31 @@ def detect_fvg(candles):
         # Bullish FVG
         if third["low"] > first["high"]:
 
-            bullish = True
-            bearish = False
-
-            gap_low = first["high"]
-            gap_high = third["low"]
+            return (
+                "BUY",
+                first["high"],
+                third["low"]
+            )
 
         # Bearish FVG
-        elif third["high"] < first["low"]:
+        if third["high"] < first["low"]:
 
-            bearish = True
-            bullish = False
-
-            gap_low = third["high"]
-            gap_high = first["low"]
-
-    if bullish:
-        return "BUY", gap_low, gap_high
-
-    if bearish:
-        return "SELL", gap_low, gap_high
+            return (
+                "SELL",
+                third["high"],
+                first["low"]
+            )
 
     return "NEUTRAL", None, None
 
 
+# ============================================================
+# SMC: BOS
+# ============================================================
+
 def detect_bos(candles):
 
     recent = candles[-1]
-
     previous = candles[-11:-1]
 
     highest = max(c["high"] for c in previous)
@@ -407,10 +343,13 @@ def detect_bos(candles):
     return "NEUTRAL"
 
 
+# ============================================================
+# SMC: SUPPORT & RESISTANCE
+# ============================================================
+
 def detect_snr(candles):
 
     recent = candles[-1]
-
     previous = candles[-30:-1]
 
     support = min(c["low"] for c in previous)
@@ -418,28 +357,28 @@ def detect_snr(candles):
 
     price = recent["close"]
 
-    distance_support = abs(price - support)
-    distance_resistance = abs(resistance - price)
-
     average_range = sum(
         c["high"] - c["low"] for c in previous
     ) / len(previous)
 
     threshold = average_range * 1.5
 
-    if distance_support <= threshold:
+    if abs(price - support) <= threshold:
         return "BUY", support
 
-    if distance_resistance <= threshold:
+    if abs(resistance - price) <= threshold:
         return "SELL", resistance
 
     return "NEUTRAL", None
 
 
+# ============================================================
+# SMC: SUPPLY & DEMAND
+# ============================================================
+
 def detect_snd(candles):
 
     recent = candles[-1]
-
     previous = candles[-20:-1]
 
     price = recent["close"]
@@ -447,51 +386,49 @@ def detect_snd(candles):
     demand = None
     supply = None
 
-    # Cari candle impulsif dari rangkaian 100 candle terakhir.
     for i in range(1, len(previous)):
 
         current = previous[i]
         before = previous[i - 1]
 
-        current_range = current["high"] - current["low"]
+        candle_range = current["high"] - current["low"]
 
-        if current_range <= 0:
+        if candle_range <= 0:
             continue
 
-        body = abs(current["close"] - current["open"])
+        body = abs(
+            current["close"] - current["open"]
+        )
 
         # Bullish displacement
         if (
             current["close"] > current["open"]
-            and body >= current_range * 0.65
+            and body >= candle_range * 0.65
             and current["close"] > before["high"]
         ):
-
             demand = current["low"]
 
         # Bearish displacement
         if (
             current["close"] < current["open"]
-            and body >= current_range * 0.65
+            and body >= candle_range * 0.65
             and current["close"] < before["low"]
         ):
-
             supply = current["high"]
+
+    current_range = max(
+        recent["high"] - recent["low"],
+        price * 0.0001
+    )
 
     if demand is not None:
 
-        if price >= demand and price <= demand + (
-            recent["high"] - recent["low"]
-        ) * 2:
-
+        if demand <= price <= demand + current_range * 2:
             return "BUY", demand
 
     if supply is not None:
 
-        if price <= supply and price >= supply - (
-            recent["high"] - recent["low"]
-        ) * 2:
-
+        if supply - current_range * 2 <= price <= supply:
             return "SELL", supply
 
     return "NEUTRAL", None
@@ -506,63 +443,52 @@ def analyze_market(symbol, timeframe):
     candles = get_candles(symbol, timeframe)
 
     last = candles[-1]
-
     price = last["close"]
 
-    fvg_signal, fvg_low, fvg_high = detect_fvg(candles)
-
-    bos_signal = detect_bos(candles)
-
-    snr_signal, snr_level = detect_snr(candles)
-
-    snd_signal, snd_level = detect_snd(candles)
+    fvg, fvg_low, fvg_high = detect_fvg(candles)
+    bos = detect_bos(candles)
+    snr, snr_level = detect_snr(candles)
+    snd, snd_level = detect_snd(candles)
 
     signals = {
-        "FVG": fvg_signal,
-        "SNR": snr_signal,
-        "SND": snd_signal,
-        "BOS": bos_signal
+        "FVG": fvg,
+        "SNR": snr,
+        "SND": snd,
+        "BOS": bos
     }
 
     buy_votes = sum(
-        1 for value in signals.values()
-        if value == "BUY"
+        value == "BUY" for value in signals.values()
     )
 
     sell_votes = sum(
-        1 for value in signals.values()
-        if value == "SELL"
+        value == "SELL" for value in signals.values()
     )
 
     if buy_votes > sell_votes:
+
         direction = "BUY"
         confirmations = buy_votes
 
     elif sell_votes > buy_votes:
+
         direction = "SELL"
         confirmations = sell_votes
 
     else:
+
         direction = "WAIT"
         confirmations = max(buy_votes, sell_votes)
 
-    if direction == "WAIT" or confirmations < 2:
+    if direction == "WAIT" or confirmations < 3:
+        status = "BELUM ADA SETUP KUAT"
 
-        status = "BELUM ADA SETUP VALID"
-
-    elif confirmations >= 4:
-
-        status = "SANGAT KUAT"
-
-    elif confirmations >= 3:
-
+    elif confirmations == 3:
         status = "KUAT"
 
     else:
+        status = "SANGAT KUAT"
 
-        status = "POTENSIAL"
-
-    # Hitung jarak SL berdasarkan rata-rata range candle.
     recent = candles[-14:]
 
     average_range = sum(
@@ -600,12 +526,8 @@ def analyze_market(symbol, timeframe):
 
     else:
 
-        entry_low = price
-        entry_high = price
-        sl = None
-        tp1 = None
-        tp2 = None
-        tp3 = None
+        entry_low = entry_high = price
+        sl = tp1 = tp2 = tp3 = None
 
     return {
         "symbol": symbol,
@@ -630,7 +552,7 @@ def analyze_market(symbol, timeframe):
 
 
 # ============================================================
-# FORMAT REPORT
+# REPORT
 # ============================================================
 
 def format_price(value):
@@ -649,35 +571,31 @@ def format_price(value):
 
 def create_report(result):
 
-    symbol = result["symbol"]
-    tf = result["timeframe"]
-
     direction = result["direction"]
 
-    if direction == "BUY":
-        emoji = "🟢"
-    elif direction == "SELL":
-        emoji = "🔴"
-    else:
-        emoji = "⚪"
+    emoji = {
+        "BUY": "🟢",
+        "SELL": "🔴",
+        "WAIT": "⚪"
+    }.get(direction, "⚪")
 
     lines = [
         "📊 ANALISA SMC SCALPING",
         "━━━━━━━━━━━━━━━━━━",
-        f"Market: {symbol}",
-        f"Timeframe: {tf}",
+        f"Market: {result['symbol']}",
+        f"Timeframe: {result['timeframe']}",
         f"Harga: {format_price(result['price'])}",
-        f"Candle dianalisis: {result['candle_count']}",
+        f"Candle dianalisis: {result['candle_count']}/100",
         "",
         f"{emoji} ARAH: {direction}",
         f"Status: {result['status']}",
         f"Konfirmasi: {result['confirmations']}/4",
         "",
         "📌 KONFIRMASI SMC",
-        f"FVG : {result['signals']['FVG']}",
-        f"SNR : {result['signals']['SNR']}",
-        f"SND : {result['signals']['SND']}",
-        f"BOS : {result['signals']['BOS']}",
+        f"FVG: {result['signals']['FVG']}",
+        f"SNR: {result['signals']['SNR']}",
+        f"SND: {result['signals']['SND']}",
+        f"BOS: {result['signals']['BOS']}"
     ]
 
     if direction in ("BUY", "SELL"):
@@ -688,20 +606,17 @@ def create_report(result):
             f"Entry: {format_price(result['entry_low'])} - "
             f"{format_price(result['entry_high'])}",
             f"Stop Loss: {format_price(result['sl'])}",
-            f"TP 1: {format_price(result['tp1'])}",
-            f"TP 2: {format_price(result['tp2'])}",
-            f"TP 3: {format_price(result['tp3'])}"
+            f"TP1: {format_price(result['tp1'])}",
+            f"TP2: {format_price(result['tp2'])}",
+            f"TP3: {format_price(result['tp3'])}"
         ])
 
     lines.extend([
         "",
         "━━━━━━━━━━━━━━━━━━",
-        "Catatan:",
-        "Tunggu konfirmasi harga sebelum entry.",
         "Skor adalah jumlah konfirmasi teknikal,",
         "bukan persentase probabilitas profit.",
-        "Level merupakan estimasi teknikal,",
-        "bukan jaminan harga akan mencapainya."
+        "Level merupakan estimasi, bukan jaminan."
     ])
 
     return "\n".join(lines)
@@ -713,16 +628,19 @@ def create_report(result):
 
 def get_calendar():
 
-    data = api_get("/api/calendar/upcoming")
-
-    return data
+    return api_get("/api/calendar")
 
 
 def get_news():
 
-    data = api_get("/api/news/market")
-
-    return data
+    return api_get(
+        "/api/news/market",
+        params={
+            "language": "en",
+            "country": "US",
+            "maxResults": 10
+        }
+    )
 
 
 def format_simple_data(data, title):
@@ -736,12 +654,15 @@ def format_simple_data(data, title):
                 break
 
     if not isinstance(data, list):
-        return f"{title}\n\nFormat data dari server tidak dikenali."
+        return f"{title}\n\nFormat data tidak dikenali."
 
     if not data:
-        return f"{title}\n\nBelum ada data tersedia."
+        return f"{title}\n\nBelum ada data."
 
-    lines = [title, "━━━━━━━━━━━━━━━━━━"]
+    lines = [
+        title,
+        "━━━━━━━━━━━━━━━━━━"
+    ]
 
     for item in data[:10]:
 
@@ -770,15 +691,104 @@ def format_simple_data(data, title):
             lines.append(f"\n• {name}")
 
             if time:
-                lines.append(f"  Waktu: {time}")
+                lines.append(f"Waktu: {time}")
 
             if impact:
-                lines.append(f"  Dampak: {impact}")
+                lines.append(f"Dampak: {impact}")
 
         else:
-            lines.append(f"\n• {str(item)}")
+            lines.append(f"\n• {item}")
 
     return "\n".join(lines)
+
+
+# ============================================================
+# TELEGRAM MENUS
+# ============================================================
+
+def main_menu():
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "🥇 XAUUSD",
+                callback_data="market_XAUUSD"
+            ),
+            InlineKeyboardButton(
+                "₿ BTCUSD",
+                callback_data="market_BTCUSD"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "📅 Kalender Ekonomi",
+                callback_data="calendar"
+            ),
+            InlineKeyboardButton(
+                "📰 Berita Market",
+                callback_data="news"
+            )
+        ]
+    ]
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+def timeframe_menu(symbol):
+
+    keyboard = []
+    row = []
+
+    for tf in TIMEFRAMES:
+
+        row.append(
+            InlineKeyboardButton(
+                tf,
+                callback_data=f"tf_{symbol}_{tf}"
+            )
+        )
+
+        if len(row) == 3:
+            keyboard.append(row)
+            row = []
+
+    if row:
+        keyboard.append(row)
+
+    keyboard.append([
+        InlineKeyboardButton(
+            "⬅️ Menu Utama",
+            callback_data="menu"
+        )
+    ])
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+def analysis_menu(symbol, timeframe):
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "🔍 ANALISA SEKARANG",
+                callback_data=f"analyze_{symbol}_{timeframe}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "⬅️ Ganti Timeframe",
+                callback_data=f"market_{symbol}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🏠 Menu Utama",
+                callback_data="menu"
+            )
+        ]
+    ]
+
+    return InlineKeyboardMarkup(keyboard)
 
 
 # ============================================================
@@ -787,12 +797,12 @@ def format_simple_data(data, title):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    log.info("/start diterima dari user %s", update.effective_user.id)
+    log.info("/start diterima")
 
     await update.message.reply_text(
         "🤖 MASTER SMC SCALPING BOT\n\n"
-        "Pilih market untuk memulai analisis.\n\n"
-        "Analisis menggunakan maksimal 100 candle terakhir.",
+        "Pilih market untuk memulai analisis.\n"
+        "Analisis memakai 100 candle tertutup terakhir.",
         reply_markup=main_menu()
     )
 
@@ -802,13 +812,13 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🟢 BOT ONLINE\n"
         "Telegram polling aktif.\n"
-        "Mode: Manual analysis.\n"
-        "Candle: 100.\n"
+        "Mode: Manual.\n"
+        "Candle: 100 candle tertutup.\n"
         "Market: XAUUSD dan BTCUSD."
     )
 
 
-async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "Pilih menu:",
@@ -817,13 +827,10 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# TELEGRAM CALLBACK
+# CALLBACK HANDLER
 # ============================================================
 
-async def callback_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     query = update.callback_query
 
@@ -831,171 +838,153 @@ async def callback_handler(
 
     data = query.data
 
-    log.info("Callback diterima: %s", data)
+    log.info("Callback: %s", data)
 
-    try:
+    if data == "menu":
 
-        if data == "menu":
+        await query.message.reply_text(
+            "Pilih market:",
+            reply_markup=main_menu()
+        )
 
-            await query.message.reply_text(
-                "Pilih market:",
-                reply_markup=main_menu()
-            )
+        return
 
+    if data.startswith("market_"):
+
+        symbol = data.replace("market_", "")
+
+        if symbol not in MARKETS:
+            await query.message.reply_text("Market tidak valid.")
             return
 
-        if data.startswith("market_"):
+        await query.message.reply_text(
+            f"Market: {symbol}\nPilih timeframe:",
+            reply_markup=timeframe_menu(symbol)
+        )
 
-            symbol = data.replace("market_", "")
+        return
 
-            if symbol not in MARKETS:
-                await query.message.reply_text("Market tidak dikenal.")
-                return
+    if data.startswith("tf_"):
 
-            await query.message.reply_text(
-                f"Market: {symbol}\nPilih timeframe:",
-                reply_markup=timeframe_menu(symbol)
-            )
+        _, symbol, timeframe = data.split("_")
 
+        if symbol not in MARKETS or timeframe not in TIMEFRAMES:
+            await query.message.reply_text("Pilihan tidak valid.")
             return
 
-        if data.startswith("tf_"):
+        await query.message.reply_text(
+            f"Market: {symbol}\n"
+            f"Timeframe: {timeframe}\n\n"
+            "Tekan tombol untuk analisis.",
+            reply_markup=analysis_menu(symbol, timeframe)
+        )
 
-            _, symbol, timeframe = data.split("_")
+        return
 
-            if symbol not in MARKETS or timeframe not in TIMEFRAMES:
-                await query.message.reply_text("Pilihan tidak valid.")
-                return
+    if data.startswith("analyze_"):
 
-            await query.message.reply_text(
-                f"Market: {symbol}\n"
-                f"Timeframe: {timeframe}\n\n"
-                "Tekan tombol untuk menjalankan analisis.",
-                reply_markup=analysis_menu(symbol, timeframe)
-            )
+        _, symbol, timeframe = data.split("_")
 
+        if symbol not in MARKETS or timeframe not in TIMEFRAMES:
+            await query.message.reply_text("Pilihan tidak valid.")
             return
 
-        if data.startswith("analyze_"):
-
-            _, symbol, timeframe = data.split("_")
-
-            if symbol not in MARKETS or timeframe not in TIMEFRAMES:
-                await query.message.reply_text("Pilihan tidak valid.")
-                return
-
-            processing = await query.message.reply_text(
-                f"⏳ Menganalisis {symbol} {timeframe}...\n"
-                "Mengambil 100 candle terakhir."
-            )
-
-            try:
-
-                result = await asyncio.to_thread(
-                    analyze_market,
-                    symbol,
-                    timeframe
-                )
-
-                report = create_report(result)
-
-                await processing.edit_text(report)
-
-                log.info(
-                    "Analisis selesai: %s %s",
-                    symbol,
-                    timeframe
-                )
-
-            except Exception as error:
-
-                log.exception("Analisis gagal")
-
-                await processing.edit_text(
-                    "❌ ANALISIS GAGAL\n\n"
-                    f"Market: {symbol}\n"
-                    f"Timeframe: {timeframe}\n\n"
-                    f"Detail error:\n{str(error)[:2500]}\n\n"
-                    "Silakan coba lagi."
-                )
-
-            return
-
-        if data == "calendar":
-
-            message = await query.message.reply_text(
-                "⏳ Mengambil kalender ekonomi..."
-            )
-
-            try:
-
-                result = await asyncio.to_thread(get_calendar)
-
-                text = format_simple_data(
-                    result,
-                    "📅 KALENDER EKONOMI"
-                )
-
-                await message.edit_text(text[:4000])
-
-            except Exception as error:
-
-                log.exception("Calendar error")
-
-                await message.edit_text(
-                    f"❌ Kalender gagal diambil:\n{str(error)[:2000]}"
-                )
-
-            return
-
-        if data == "news":
-
-            message = await query.message.reply_text(
-                "⏳ Mengambil berita market..."
-            )
-
-            try:
-
-                result = await asyncio.to_thread(get_news)
-
-                text = format_simple_data(
-                    result,
-                    "📰 BERITA MARKET"
-                )
-
-                await message.edit_text(text[:4000])
-
-            except Exception as error:
-
-                log.exception("News error")
-
-                await message.edit_text(
-                    f"❌ Berita gagal diambil:\n{str(error)[:2000]}"
-                )
-
-            return
-
-    except Exception:
-
-        log.exception("Callback handler error")
+        processing = await query.message.reply_text(
+            f"⏳ Menganalisis {symbol} {timeframe}...\n"
+            "Mengambil 100 candle tertutup."
+        )
 
         try:
-            await query.message.reply_text(
-                "❌ Terjadi kesalahan pada tombol. "
-                "Silakan coba lagi."
+
+            result = await asyncio.to_thread(
+                analyze_market,
+                symbol,
+                timeframe
             )
-        except Exception:
-            pass
+
+            await processing.edit_text(
+                create_report(result)
+            )
+
+            log.info(
+                "Analisis selesai: %s %s",
+                symbol,
+                timeframe
+            )
+
+        except Exception as error:
+
+            log.exception("ANALISIS GAGAL")
+
+            await processing.edit_text(
+                "❌ ANALISIS GAGAL\n\n"
+                f"Market: {symbol}\n"
+                f"Timeframe: {timeframe}\n\n"
+                f"Detail error:\n{str(error)[:2500]}"
+            )
+
+        return
+
+    if data == "calendar":
+
+        message = await query.message.reply_text(
+            "⏳ Mengambil kalender ekonomi..."
+        )
+
+        try:
+
+            result = await asyncio.to_thread(get_calendar)
+
+            await message.edit_text(
+                format_simple_data(
+                    result,
+                    "📅 KALENDER EKONOMI"
+                )[:4000]
+            )
+
+        except Exception as error:
+
+            log.exception("CALENDAR ERROR")
+
+            await message.edit_text(
+                f"❌ Kalender gagal:\n{str(error)[:2000]}"
+            )
+
+        return
+
+    if data == "news":
+
+        message = await query.message.reply_text(
+            "⏳ Mengambil berita market..."
+        )
+
+        try:
+
+            result = await asyncio.to_thread(get_news)
+
+            await message.edit_text(
+                format_simple_data(
+                    result,
+                    "📰 BERITA MARKET"
+                )[:4000]
+            )
+
+        except Exception as error:
+
+            log.exception("NEWS ERROR")
+
+            await message.edit_text(
+                f"❌ Berita gagal:\n{str(error)[:2000]}"
+            )
+
+        return
 
 
 # ============================================================
-# TELEGRAM ERROR HANDLER
+# ERROR HANDLER
 # ============================================================
 
-async def error_handler(
-    update: object,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def error_handler(update, context):
 
     log.error(
         "Telegram error: %s",
@@ -1008,17 +997,16 @@ async def error_handler(
 # STARTUP
 # ============================================================
 
-async def post_init(application: Application):
+async def post_init(application):
 
-    log.info("========================================")
+    log.info("======================================")
     log.info("MASTER SMC SCALPING BOT STARTED")
-    log.info("Telegram initialization successful")
     log.info("Markets: XAUUSD, BTCUSD")
     log.info("Timeframes: M1 M5 M15 M30 H1 H4")
-    log.info("Candles: LAST 100 CLOSED CANDLES")
+    log.info("Candles: 100 CLOSED CANDLES")
     log.info("Strategy: FVG + SNR + SND + BOS")
     log.info("Mode: MANUAL")
-    log.info("========================================")
+    log.info("======================================")
 
     bot_info = await application.bot.get_me()
 
@@ -1032,12 +1020,10 @@ async def post_init(application: Application):
 def main():
 
     if not BOT_TOKEN:
-
         log.error("BOT_TOKEN tidak ditemukan!")
-
         sys.exit(1)
 
-    log.info("Memulai Telegram bot...")
+    log.info("Membangun Telegram application...")
 
     application = (
         Application.builder()
@@ -1055,7 +1041,7 @@ def main():
     )
 
     application.add_handler(
-        CommandHandler("menu", menu)
+        CommandHandler("menu", menu_command)
     )
 
     application.add_handler(
@@ -1064,12 +1050,11 @@ def main():
 
     application.add_error_handler(error_handler)
 
-    log.info("Menjalankan polling Telegram...")
+    log.info("Menjalankan Telegram polling...")
 
     application.run_polling(
         drop_pending_updates=True,
-        allowed_updates=Update.ALL_TYPES,
-        close_loop=False
+        allowed_updates=Update.ALL_TYPES
     )
 
 
@@ -1079,10 +1064,8 @@ if __name__ == "__main__":
         main()
 
     except KeyboardInterrupt:
-
         log.info("Bot dihentikan.")
 
     except Exception:
-
         log.exception("FATAL ERROR")
         raise
