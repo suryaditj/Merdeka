@@ -903,7 +903,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
             await processing.edit_text(
-                create_report(result)
+             create_report(result),
+    reply_markup=analysis_menu(symbol, timeframe)
+)
             )
 
             log.info(
