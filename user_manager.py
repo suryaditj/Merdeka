@@ -5,18 +5,20 @@ import html
 from datetime import datetime
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from config import (
-    USERS_FILE, ENV_ADMIN_ID, WIB, log,
+    USERS_FILE, ENV_ADMIN_ID, MARKETS, WIB, log,
     today_wib_date, parse_date_ymd, github_sync_json_file
 )
 
 USERS_DB = {
     "admin_ids": [],
     "admin_username": "",
+    "free_mode": True,       # Default GRATIS SEMUA; bisa diubah Admin via tombol inline di /admin
     "trial_limit": 2,
     "members": {},
     "trials": {},
     "risk_profiles": {},
-    "price_alerts": []
+    "price_alerts": [],
+    "signal_subs": {}        # Format: {"user_id": "ALL" | "XAUUSD" | "BTCUSD" | "OFF"}
 }
 
 
@@ -37,11 +39,13 @@ def load_users_db():
             if isinstance(data, dict):
                 USERS_DB["admin_ids"] = [int(x) for x in data.get("admin_ids", []) if str(x).isdigit()]
                 USERS_DB["admin_username"] = str(data.get("admin_username", "")).strip().lstrip("@")
+                USERS_DB["free_mode"] = bool(data.get("free_mode", True))
                 USERS_DB["trial_limit"] = int(data.get("trial_limit", 2))
                 USERS_DB["members"] = data.get("members", {}) if isinstance(data.get("members"), dict) else {}
                 USERS_DB["trials"] = data.get("trials", {}) if isinstance(data.get("trials"), dict) else {}
                 USERS_DB["risk_profiles"] = data.get("risk_profiles", {}) if isinstance(data.get("risk_profiles"), dict) else {}
                 USERS_DB["price_alerts"] = data.get("price_alerts", []) if isinstance(data.get("price_alerts"), list) else []
+                USERS_DB["signal_subs"] = data.get("signal_subs", {}) if isinstance(data.get("signal_subs"), dict) else {}
         except Exception as err:
             log.error("Gagal membaca %s: %s", USERS_FILE, err)
 
@@ -56,15 +60,13 @@ def is_admin(user_id):
     return int(user_id) in USERS_DB["admin_ids"]
 
 
-def get_active_vip_ids():
-    today = today_wib_date()
-    vip_ids = set(USERS_DB["admin_ids"])
-    for uid_str, info in USERS_DB["members"].items():
-        if uid_str.isdigit() and isinstance(info, dict):
-            exp = parse_date_ymd(info.get("expired", ""))
-            if exp and today <= exp:
-                vip_ids.add(int(uid_str))
-    return sorted(vip_ids)
+def is_free_mode():
+    return bool(USERS_DB.get("free_mode", True))
+
+
+def toggle_free_mode():
+    USERS_DB["free_mode"] = not is_free_mode()
+    return sync_users()
 
 
 def check_user_access(user_id):
@@ -79,10 +81,16 @@ def check_user_access(user_id):
     if isinstance(member, dict):
         exp_str = str(member.get("expired", "")).strip()
         exp_date = parse_date_ymd(exp_str)
-        if exp_date is not None:
-            if today <= exp_date:
-                sisa = (exp_date - today).days
-                return True, "VIP", f"Member VIP Aktif (s/d {exp_str} • Sisa {sisa} hari)"
+        if exp_date is not None and today <= exp_date:
+            sisa = (exp_date - today).days
+            return True, "VIP", f"Member VIP Aktif (s/d {exp_str} • Sisa {sisa} hari)"
+
+    if is_free_mode():
+        return True, "FREE", "Mode Gratis Terbuka (Semua Fitur Aktif)"
+
+    if isinstance(member, dict):
+        exp_str = str(member.get("expired", "")).strip()
+        if exp_str:
             return False, "LOCKED", f"Masa aktif habis pada {exp_str}"
 
     trial_limit = max(0, int(USERS_DB.get("trial_limit", 2)))
@@ -95,6 +103,8 @@ def check_user_access(user_id):
 
 
 def consume_trial_if_needed(user_id):
+    if is_free_mode():
+        return
     uid = int(user_id)
     if is_admin(uid):
         return
@@ -108,6 +118,47 @@ def consume_trial_if_needed(user_id):
     USERS_DB["trials"][uid_str] = int(USERS_DB["trials"].get(uid_str, 0)) + 1
     sync_users()
 
+
+# ============================================================
+# SIGNAL SUBSCRIPTIONS (3-TF H1 + M15 + M5)
+# ============================================================
+
+def get_user_signal_sub(user_id):
+    val = str(USERS_DB["signal_subs"].get(str(int(user_id)), "OFF")).upper()
+    return val if val in ("ALL", "XAUUSD", "BTCUSD", "OFF") else "OFF"
+
+
+def set_user_signal_sub(user_id, mode):
+    uid_str = str(int(user_id))
+    mode_clean = str(mode).upper()
+    if mode_clean == "OFF":
+        USERS_DB["signal_subs"].pop(uid_str, None)
+    else:
+        USERS_DB["signal_subs"][uid_str] = mode_clean
+    return sync_users()
+
+
+def get_signal_subscribers_for(symbol):
+    """
+    Mengembalikan list user_id yang berlangganan sinyal otomatis untuk symbol tertentu
+    dan memiliki akses aktif (Free Mode, VIP Aktif, atau Admin).
+    """
+    recipients = []
+    for uid_str, mode in USERS_DB["signal_subs"].items():
+        if not uid_str.isdigit():
+            continue
+        mode_up = str(mode).upper()
+        if mode_up in ("ALL", symbol):
+            uid = int(uid_str)
+            allowed, role, _ = check_user_access(uid)
+            if allowed and role in ("ADMIN", "VIP", "FREE"):
+                recipients.append(uid)
+    return recipients
+
+
+# ============================================================
+# RISK PROFILE & PRICE ALERTS
+# ============================================================
 
 def set_user_risk_profile(user_id, balance, risk_pct):
     uid_str = str(int(user_id))
