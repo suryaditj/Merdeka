@@ -9,6 +9,9 @@
 #
 # KALENDER EKONOMI US & BERITA MARKET:
 # DIDUKUNG GEMINI AI FAST MODE + CACHE (KHUSUS ISU XAUUSD)
+#
+# MANAJEMEN AKSES MEMBER:
+# FULL ADMIN COMMAND VIA TELEGRAM + AUTO-SYNC GITHUB
 # ============================================================
 
 import os
@@ -17,6 +20,7 @@ import sys
 import time
 import json
 import html
+import base64
 import logging
 import asyncio
 import requests
@@ -42,7 +46,11 @@ from telegram.ext import (
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
+GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY", "").strip()
+ENV_ADMIN_ID = os.getenv("ADMIN_ID", "").strip()
 
+USERS_FILE = "users.json"
 BASE_URL = "https://biquote.io"
 
 # Urutan model dari yang paling cepat (minimal thinking)
@@ -100,7 +108,7 @@ log = logging.getLogger("SMC_BOT")
 SESSION = requests.Session()
 
 SESSION.headers.update({
-    "User-Agent": "Mozilla/5.0 SMC-Bot/2.6",
+    "User-Agent": "Mozilla/5.0 SMC-Bot/3.0",
     "Accept": "application/json"
 })
 
@@ -123,6 +131,199 @@ def api_get(endpoint, params=None):
         raise ValueError(
             f"Respons API bukan JSON: {response.text[:500]}"
         )
+
+
+# ============================================================
+# USER ACCESS & GITHUB AUTO-SYNC MANAGER
+# ============================================================
+
+USERS_DB = {
+    "admin_ids": [],
+    "admin_username": "",
+    "trial_limit": 2,
+    "members": {},
+    "trials": {}
+}
+
+
+def today_wib_date():
+    return datetime.now(WIB).date()
+
+
+def parse_date_ymd(date_str):
+    try:
+        return datetime.strptime(str(date_str).strip(), "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def sync_users_to_github():
+    """
+    Menyimpan users.json secara lokal DAN langsung commit ke GitHub repo
+    melalui GitHub API agar data member tetap tersimpan permanen saat
+    GitHub Actions restart.
+    """
+    try:
+        with open(USERS_FILE, "w", encoding="utf-8") as f:
+            json.dump(USERS_DB, f, indent=2, ensure_ascii=False)
+    except Exception as err:
+        log.error("Gagal menulis %s lokal: %s", USERS_FILE, err)
+
+    if not GITHUB_TOKEN or not GITHUB_REPOSITORY:
+        return False, "Tersimpan lokal (GITHUB_TOKEN/REPO tidak tersedia)."
+
+    api_url = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/contents/{USERS_FILE}"
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28"
+    }
+
+    try:
+        sha = None
+        get_resp = requests.get(api_url, headers=headers, timeout=15)
+        if get_resp.status_code == 200:
+            sha = get_resp.json().get("sha")
+
+        content_str = json.dumps(USERS_DB, indent=2, ensure_ascii=False) + "\n"
+        encoded = base64.b64encode(content_str.encode("utf-8")).decode("utf-8")
+
+        payload = {
+            "message": "chore: update users.json via Telegram Admin",
+            "content": encoded
+        }
+        if sha:
+            payload["sha"] = sha
+
+        put_resp = requests.put(api_url, headers=headers, json=payload, timeout=15)
+        if put_resp.status_code in (200, 201):
+            log.info("users.json berhasil disinkronkan ke GitHub.")
+            return True, "Tersimpan permanen ke GitHub."
+
+        log.warning("Gagal sync GitHub HTTP %s: %s", put_resp.status_code, put_resp.text[:200])
+        return False, f"Gagal sync GitHub (HTTP {put_resp.status_code})."
+
+    except Exception as err:
+        log.warning("Error sync GitHub: %s", err)
+        return False, f"Error sync GitHub: {str(err)[:80]}"
+
+
+def load_users_db():
+    global USERS_DB
+
+    if os.path.exists(USERS_FILE):
+        try:
+            with open(USERS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                USERS_DB["admin_ids"] = [int(x) for x in data.get("admin_ids", []) if str(x).isdigit()]
+                USERS_DB["admin_username"] = str(data.get("admin_username", "")).strip().lstrip("@")
+                USERS_DB["trial_limit"] = int(data.get("trial_limit", 2))
+                USERS_DB["members"] = data.get("members", {}) if isinstance(data.get("members"), dict) else {}
+                USERS_DB["trials"] = data.get("trials", {}) if isinstance(data.get("trials"), dict) else {}
+        except Exception as err:
+            log.error("Gagal membaca %s: %s", USERS_FILE, err)
+
+    if ENV_ADMIN_ID.isdigit():
+        env_id = int(ENV_ADMIN_ID)
+        if env_id not in USERS_DB["admin_ids"]:
+            USERS_DB["admin_ids"].append(env_id)
+            sync_users_to_github()
+
+
+def is_admin(user_id):
+    return int(user_id) in USERS_DB["admin_ids"]
+
+
+def check_user_access(user_id):
+    """
+    Mengembalikan tuple:
+    (allowed: bool, role: str, info_text: str)
+    role: 'ADMIN' | 'VIP' | 'TRIAL' | 'LOCKED'
+    """
+    uid = int(user_id)
+    uid_str = str(uid)
+
+    if is_admin(uid):
+        return True, "ADMIN", "Admin (Akses Penuh Tanpa Batas)"
+
+    today = today_wib_date()
+    member = USERS_DB["members"].get(uid_str)
+
+    if isinstance(member, dict):
+        exp_str = str(member.get("expired", "")).strip()
+        exp_date = parse_date_ymd(exp_str)
+        if exp_date is not None:
+            if today <= exp_date:
+                sisa = (exp_date - today).days
+                return True, "VIP", f"Member VIP Aktif (s/d {exp_str} • Sisa {sisa} hari)"
+            else:
+                return False, "LOCKED", f"Masa aktif habis pada {exp_str}"
+
+    trial_limit = max(0, int(USERS_DB.get("trial_limit", 2)))
+    used_trials = int(USERS_DB["trials"].get(uid_str, 0))
+
+    if used_trials < trial_limit:
+        sisa_trial = trial_limit - used_trials
+        return True, "TRIAL", f"Mode Trial Gratis (Sisa {sisa_trial}x analisa)"
+
+    return False, "LOCKED", "Belum terdaftar sebagai Member VIP"
+
+
+def consume_trial_if_needed(user_id):
+    uid = int(user_id)
+    if is_admin(uid):
+        return
+
+    uid_str = str(uid)
+    today = today_wib_date()
+    member = USERS_DB["members"].get(uid_str)
+    if isinstance(member, dict):
+        exp_date = parse_date_ymd(member.get("expired", ""))
+        if exp_date and today <= exp_date:
+            return
+
+    used = int(USERS_DB["trials"].get(uid_str, 0))
+    USERS_DB["trials"][uid_str] = used + 1
+    sync_users_to_github()
+
+
+def build_locked_message_and_markup(user):
+    uid = user.id
+    _, _, reason = check_user_access(uid)
+    admin_user = USERS_DB.get("admin_username", "").strip().lstrip("@")
+
+    text = (
+        "🔒 <b>AKSES TERBATAS (KHUSUS MEMBER VIP)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"🆔 ID Telegram Kamu: <code>{uid}</code>\n"
+        f"📌 Status: <b>{html.escape(reason)}</b>\n\n"
+        "Untuk mengaktifkan akses penuh semua market &amp; timeframe, "
+        "salin <b>ID Telegram</b> di atas lalu kirimkan ke Admin."
+    )
+
+    buttons = []
+    if admin_user:
+        buttons.append([
+            InlineKeyboardButton(
+                "💬 Hubungi Admin untuk Aktivasi",
+                url=f"https://t.me/{admin_user}"
+            )
+        ])
+    elif USERS_DB["admin_ids"]:
+        first_admin = USERS_DB["admin_ids"][0]
+        buttons.append([
+            InlineKeyboardButton(
+                "💬 Hubungi Admin untuk Aktivasi",
+                url=f"tg://user?id={first_admin}"
+            )
+        ])
+
+    buttons.append([
+        InlineKeyboardButton("🔄 Cek Status Saya", callback_data="check_my_status")
+    ])
+
+    return text, InlineKeyboardMarkup(buttons)
 
 
 # ============================================================
@@ -202,9 +403,6 @@ def call_gemini_json(prompt_text):
 # ============================================================
 
 def extract_raw_time(item):
-    """
-    Mencari field waktu dari berbagai kemungkinan nama properti API.
-    """
     if not isinstance(item, dict):
         return None
 
@@ -221,9 +419,6 @@ def extract_raw_time(item):
 
 
 def parse_event_dt_wib(value):
-    """
-    Mengubah string/timestamp waktu API menjadi objek datetime WIB.
-    """
     if value is None or str(value).strip() == "":
         return None
 
@@ -246,9 +441,6 @@ def parse_event_dt_wib(value):
 
 
 def format_wib_time(value):
-    """
-    Mengonversi timestamp/ISO string ke format waktu WIB yang rapi.
-    """
     dt_wib = parse_event_dt_wib(value)
     if dt_wib is not None:
         bulan = BULAN_ID.get(dt_wib.month, dt_wib.strftime("%b"))
@@ -445,13 +637,7 @@ def get_candles(symbol, timeframe):
 # ============================================================
 
 def detect_ob(candles):
-    """
-    Mendeteksi Valid Order Block (OB):
-    1. Candle lawan arah terakhir sebelum dorongan impulsif.
-    2. Dorongan impulsif memicu Fair Value Gap (FVG / Imbalance).
-    3. Dorongan impulsif mematahkan struktur swing terdekat (BOS).
-    4. Zona OB belum ditembus (masih fresh) dan sedang di-retest harga saat ini.
-    """
+
     recent = candles[-1]
     price = recent["close"]
 
@@ -476,7 +662,7 @@ def detect_ob(candles):
         prev_slice = lookback[max(0, i - 8):i]
         impulse_slice = lookback[i + 1: min(len(lookback), i + 4)]
 
-        # 1. Cek Valid Bullish OB (Candle Bearish sebelum lonjakan naik)
+        # 1. Valid Bullish OB
         if ob["close"] < ob["open"]:
             c1_range = c1["high"] - c1["low"]
             c1_body = c1["close"] - c1["open"]
@@ -491,7 +677,6 @@ def detect_ob(candles):
             broke_structure = any(c["close"] > prev_swing_high for c in impulse_slice)
 
             if strong_impulse and has_fvg and broke_structure:
-                # Pastikan zona OB belum ditembus ke bawah setelah terbentuk
                 invalidated = any(
                     lookback[k]["close"] < ob_low - (buffer * 0.5)
                     for k in range(i + 3, len(lookback))
@@ -499,7 +684,7 @@ def detect_ob(candles):
                 if not invalidated and (ob_low - buffer <= price <= ob_high + buffer):
                     return "BUY", "Bullish OB", ob_low, ob_high
 
-        # 2. Cek Valid Bearish OB (Candle Bullish sebelum penurunan tajam)
+        # 2. Valid Bearish OB
         if ob["close"] > ob["open"]:
             c1_range = c1["high"] - c1["low"]
             c1_body = c1["open"] - c1["close"]
@@ -514,7 +699,6 @@ def detect_ob(candles):
             broke_structure = any(c["close"] < prev_swing_low for c in impulse_slice)
 
             if strong_impulse and has_fvg and broke_structure:
-                # Pastikan zona OB belum ditembus ke atas setelah terbentuk
                 invalidated = any(
                     lookback[k]["close"] > ob_high + (buffer * 0.5)
                     for k in range(i + 3, len(lookback))
@@ -536,23 +720,11 @@ def detect_fvg(candles):
         first = candles[i - 2]
         third = candles[i]
 
-        # Bullish FVG
         if third["low"] > first["high"]:
+            return "BUY", first["high"], third["low"]
 
-            return (
-                "BUY",
-                first["high"],
-                third["low"]
-            )
-
-        # Bearish FVG
         if third["high"] < first["low"]:
-
-            return (
-                "SELL",
-                third["high"],
-                first["low"]
-            )
+            return "SELL", third["high"], first["low"]
 
     return "NEUTRAL", None, None
 
@@ -649,7 +821,6 @@ def detect_sbr_rbs(candles):
         ):
             swing_lows.append((i, l))
 
-    # Cek RBS (Resistance ditembus ke atas -> jadi Support)
     for idx, res_level in reversed(swing_highs):
         broken_up = any(
             lookback[k]["close"] > res_level
@@ -662,7 +833,6 @@ def detect_sbr_rbs(candles):
             ):
                 return "BUY", "RBS", res_level
 
-    # Cek SBR (Support ditembus ke bawah -> jadi Resistance)
     for idx, sup_level in reversed(swing_lows):
         broken_down = any(
             lookback[k]["close"] < sup_level
@@ -706,7 +876,6 @@ def detect_snd(candles):
             current["close"] - current["open"]
         )
 
-        # Bullish displacement
         if (
             current["close"] > current["open"]
             and body >= candle_range * 0.65
@@ -714,7 +883,6 @@ def detect_snd(candles):
         ):
             demand = current["low"]
 
-        # Bearish displacement
         if (
             current["close"] < current["open"]
             and body >= candle_range * 0.65
@@ -728,12 +896,10 @@ def detect_snd(candles):
     )
 
     if demand is not None:
-
         if demand <= price <= demand + current_range * 2:
             return "BUY", demand
 
     if supply is not None:
-
         if supply - current_range * 2 <= price <= supply:
             return "SELL", supply
 
@@ -793,7 +959,6 @@ def detect_rbr_dbd(candles):
             zone_low = min(bc["low"] for bc in base_candles)
             zone_high = max(bc["high"] for bc in base_candles)
 
-            # Cek pola RBR (Rally - Base - Rally) -> BUY
             if (
                 is_strong_bull(leg1)
                 and is_strong_bull(leg2)
@@ -806,7 +971,6 @@ def detect_rbr_dbd(candles):
                 if not invalidated and (zone_low - buffer <= price <= zone_high + buffer):
                     return "BUY", "RBR", zone_low, zone_high
 
-            # Cek pola DBD (Drop - Base - Drop) -> SELL
             if (
                 is_strong_bear(leg1)
                 and is_strong_bear(leg2)
@@ -851,35 +1015,23 @@ def analyze_market(symbol, timeframe):
         "RBR_DBD": rbr_dbd
     }
 
-    buy_votes = sum(
-        value == "BUY" for value in signals.values()
-    )
-
-    sell_votes = sum(
-        value == "SELL" for value in signals.values()
-    )
+    buy_votes = sum(value == "BUY" for value in signals.values())
+    sell_votes = sum(value == "SELL" for value in signals.values())
 
     if buy_votes > sell_votes:
-
         direction = "BUY"
         confirmations = buy_votes
-
     elif sell_votes > buy_votes:
-
         direction = "SELL"
         confirmations = sell_votes
-
     else:
-
         direction = "WAIT"
         confirmations = max(buy_votes, sell_votes)
 
     if direction == "WAIT" or confirmations < 3:
         status = "BELUM ADA SETUP KUAT"
-
     elif confirmations in (3, 4):
         status = "KUAT"
-
     else:
         status = "SANGAT KUAT"
 
@@ -1070,12 +1222,10 @@ def create_report(result):
 # ============================================================
 
 def get_calendar():
-
     return api_get("/api/calendar")
 
 
 def get_news():
-
     return api_get(
         "/api/news/market",
         params={
@@ -1120,9 +1270,6 @@ def _impact_rank_and_badge(raw_impact, title_en):
 
 
 def _analyze_calendar_with_gemini(events_payload):
-    """
-    Prompt ringkas agar Gemini menjawab super cepat (< 2 detik).
-    """
     prompt = (
         "Analis fundamental Emas (XAUUSD) untuk pemula (bahasa Indonesia sehari-hari, singkat, jelas).\n"
         f"Data jadwal US: {json.dumps(events_payload, ensure_ascii=False)}\n"
@@ -1350,9 +1497,6 @@ def format_calendar_data(data):
 
 
 def _analyze_news_with_gemini(news_payload):
-    """
-    Prompt ringkas agar Gemini menjawab cepat (< 2 detik).
-    """
     prompt = (
         "Analis pasar untuk pemula (bahasa Indonesia sehari-hari, singkat, jelas).\n"
         f"Berita US: {json.dumps(news_payload, ensure_ascii=False)}\n"
@@ -1575,6 +1719,12 @@ def main_menu():
                 "📰 Berita Market",
                 callback_data="news"
             )
+        ],
+        [
+            InlineKeyboardButton(
+                "👤 Status Akun Saya",
+                callback_data="check_my_status"
+            )
         ]
     ]
 
@@ -1657,43 +1807,429 @@ def info_menu(refresh_action):
 
 
 # ============================================================
-# TELEGRAM COMMANDS
+# TELEGRAM USER COMMANDS
 # ============================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    log.info("/start diterima")
+    user = update.effective_user
+    allowed, role, status_info = check_user_access(user.id)
 
-    await update.message.reply_text(
-        "🤖 MASTER SMC SCALPING BOT\n\n"
-        "Pilih market untuk memulai analisis.\n"
-        "• Analisa Chart: 100% Murni SMC (OB Valid + FVG + BOS + SNR + SBR/RBS + SND + RBR/DBD)\n"
-        "• Kalender & Berita: Analisa Fundamental Gemini AI",
+    log.info("/start dari %s (%s) -> %s", user.id, user.first_name, role)
+
+    if not USERS_DB["admin_ids"]:
+        await update.message.reply_html(
+            "🤖 <b>MASTER SMC SCALPING BOT</b>\n\n"
+            "⚠️ <b>Admin belum diklaim.</b>\n"
+            f"ID Telegram kamu: <code>{user.id}</code>\n\n"
+            "Ketik <code>/claimadmin</code> sekarang untuk mengunci akunmu sebagai <b>Admin Utama</b>."
+        )
+        return
+
+    if not allowed:
+        text, markup = build_locked_message_and_markup(user)
+        await update.message.reply_html(text, reply_markup=markup)
+        return
+
+    admin_hint = "\n👑 Ketik /admin untuk membuka panel kelola member." if role == "ADMIN" else ""
+
+    await update.message.reply_html(
+        "🤖 <b>MASTER SMC SCALPING BOT</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"🆔 ID Kamu: <code>{user.id}</code>\n"
+        f"📌 Status: <b>{html.escape(status_info)}</b>\n\n"
+        "• <b>Analisa Chart:</b> 100% Murni SMC (OB Valid + FVG + BOS + SNR + SBR/RBS + SND + RBR/DBD)\n"
+        "• <b>Kalender &amp; Berita:</b> Fundamental Gemini AI"
+        f"{admin_hint}",
         reply_markup=main_menu()
     )
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    if GEMINI_API_KEY:
-        ai_status = f"Terdeteksi (Akhiran ...{GEMINI_API_KEY[-4:]})"
-    else:
-        ai_status = "TIDAK TERDETEKSI (Cek bot.yml & GitHub Secrets)"
+    user = update.effective_user
+    _, _, user_status = check_user_access(user.id)
 
-    await update.message.reply_text(
-        "🟢 BOT ONLINE\n"
-        "Telegram polling aktif.\n"
-        "Analisa Candle: Murni SMC (OB Valid + 6 Metode).\n"
-        f"GEMINI_API_KEY: {ai_status}.\n"
-        "Market: XAUUSD dan BTCUSD."
+    if GEMINI_API_KEY:
+        ai_status = f"Terdeteksi (...{GEMINI_API_KEY[-4:]})"
+    else:
+        ai_status = "TIDAK TERDETEKSI"
+
+    gh_sync_status = "Aktif (Auto-Commit)" if (GITHUB_TOKEN and GITHUB_REPOSITORY) else "Lokal Saja"
+
+    await update.message.reply_html(
+        "🟢 <b>STATUS BOT &amp; AKUN</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"🆔 ID Kamu: <code>{user.id}</code>\n"
+        f"👤 Akses Kamu: <b>{html.escape(user_status)}</b>\n"
+        f"🤖 Gemini AI: <b>{ai_status}</b>\n"
+        f"☁️ Sync Member GitHub: <b>{gh_sync_status}</b>\n"
+        f"👥 Total Member Terdaftar: <b>{len(USERS_DB['members'])}</b>"
     )
 
 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
+    user = update.effective_user
+    allowed, _, _ = check_user_access(user.id)
+
+    if not allowed:
+        text, markup = build_locked_message_and_markup(user)
+        await update.message.reply_html(text, reply_markup=markup)
+        return
+
     await update.message.reply_text(
         "Pilih menu:",
         reply_markup=main_menu()
+    )
+
+
+# ============================================================
+# TELEGRAM ADMIN COMMANDS (FULL CONTROL VIA TELEGRAM)
+# ============================================================
+
+async def claim_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+
+    if USERS_DB["admin_ids"]:
+        if is_admin(user.id):
+            await update.message.reply_text("✅ Kamu sudah terdaftar sebagai Admin.")
+        else:
+            await update.message.reply_text("⛔ Admin sudah diklaim oleh pemilik bot.")
+        return
+
+    USERS_DB["admin_ids"].append(int(user.id))
+    if user.username:
+        USERS_DB["admin_username"] = user.username
+
+    ok, sync_msg = await asyncio.to_thread(sync_users_to_github)
+
+    await update.message.reply_html(
+        "👑 <b>ADMIN BERHASIL DIKLAIM!</b>\n"
+        f"ID Admin: <code>{user.id}</code>\n"
+        f"Status Simpan: <i>{html.escape(sync_msg)}</i>\n\n"
+        "Ketik /admin untuk melihat daftar perintah kelola member.",
+        reply_markup=main_menu()
+    )
+
+
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_admin(user.id):
+        await update.message.reply_text("⛔ Perintah ini khusus Admin.")
+        return
+
+    today = today_wib_date()
+    aktif_count = 0
+    expired_count = 0
+    for m in USERS_DB["members"].values():
+        exp = parse_date_ymd(m.get("expired", ""))
+        if exp and today <= exp:
+            aktif_count += 1
+        else:
+            expired_count += 1
+
+    contact_disp = f"@{USERS_DB['admin_username']}" if USERS_DB["admin_username"] else "(Belum diatur)"
+
+    text = (
+        "👑 <b>PANEL ADMIN BOT SMC</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"• Member VIP Aktif: <b>{aktif_count}</b>\n"
+        f"• Member Expired: <b>{expired_count}</b>\n"
+        f"• Jatah Trial User Baru: <b>{USERS_DB['trial_limit']}x</b>\n"
+        f"• Kontak Admin: <b>{html.escape(contact_disp)}</b>\n\n"
+        "📋 <b>DAFTAR PERINTAH ADMIN:</b>\n"
+        "1️⃣ <b>Tambah Member Baru:</b>\n"
+        "<code>/add 987654321 30 Budi</code>\n"
+        "<i>(Format: /add ID_TELEGRAM JUMLAH_HARI NAMA)</i>\n\n"
+        "2️⃣ <b>Tambah / Perpanjang Masa Aktif:</b>\n"
+        "<code>/perpanjang 987654321 30</code>\n"
+        "<i>(Menambah hari ke masa aktif user)</i>\n\n"
+        "3️⃣ <b>Cek Detail User:</b>\n"
+        "<code>/cekuser 987654321</code>\n\n"
+        "4️⃣ <b>Hapus Member:</b>\n"
+        "<code>/hapus 987654321</code>\n\n"
+        "5️⃣ <b>Lihat Semua Member:</b>\n"
+        "<code>/listuser</code>\n\n"
+        "6️⃣ <b>Atur Jatah Trial Gratis (0 = Kunci Total):</b>\n"
+        "<code>/settrial 2</code>\n\n"
+        "7️⃣ <b>Atur Username Kontak Admin:</b>\n"
+        "<code>/setcontact username_kamu</code>"
+    )
+
+    await update.message.reply_html(text)
+
+
+async def cmd_add_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_admin(user.id):
+        await update.message.reply_text("⛔ Perintah ini khusus Admin.")
+        return
+
+    args = context.args or []
+    if len(args) < 2 or not args[0].isdigit() or not args[1].isdigit():
+        await update.message.reply_html(
+            "⚠️ Format salah.\nContoh: <code>/add 987654321 30 Budi</code>"
+        )
+        return
+
+    target_id = args[0].strip()
+    days = int(args[1])
+    nama = " ".join(args[2:]).strip() if len(args) >= 3 else "Member VIP"
+
+    if days <= 0:
+        await update.message.reply_text("⚠️ Jumlah hari harus lebih dari 0.")
+        return
+
+    today = today_wib_date()
+    exp_date = today + timedelta(days=days)
+    exp_str = exp_date.strftime("%Y-%m-%d")
+
+    USERS_DB["members"][target_id] = {
+        "nama": nama,
+        "expired": exp_str,
+        "updated_at": datetime.now(WIB).strftime("%Y-%m-%d %H:%M WIB")
+    }
+
+    _, sync_msg = await asyncio.to_thread(sync_users_to_github)
+
+    await update.message.reply_html(
+        "✅ <b>MEMBER BERHASIL DITAMBAHKAN</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"🆔 ID: <code>{target_id}</code>\n"
+        f"👤 Nama: <b>{html.escape(nama)}</b>\n"
+        f"⏳ Durasi: <b>{days} hari</b>\n"
+        f"📅 Aktif s/d: <b>{exp_str}</b>\n"
+        f"☁️ Status: <i>{html.escape(sync_msg)}</i>"
+    )
+
+
+async def cmd_extend_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_admin(user.id):
+        await update.message.reply_text("⛔ Perintah ini khusus Admin.")
+        return
+
+    args = context.args or []
+    if len(args) < 2 or not args[0].isdigit() or not args[1].isdigit():
+        await update.message.reply_html(
+            "⚠️ Format salah.\nContoh: <code>/perpanjang 987654321 30</code>"
+        )
+        return
+
+    target_id = args[0].strip()
+    add_days = int(args[1])
+
+    if add_days <= 0:
+        await update.message.reply_text("⚠️ Jumlah hari harus lebih dari 0.")
+        return
+
+    today = today_wib_date()
+    existing = USERS_DB["members"].get(target_id)
+
+    if isinstance(existing, dict):
+        nama = existing.get("nama", "Member VIP")
+        old_exp = parse_date_ymd(existing.get("expired", ""))
+        base_date = old_exp if (old_exp and old_exp > today) else today
+    else:
+        nama = "Member VIP"
+        base_date = today
+
+    new_exp = base_date + timedelta(days=add_days)
+    new_exp_str = new_exp.strftime("%Y-%m-%d")
+    sisa_hari = (new_exp - today).days
+
+    USERS_DB["members"][target_id] = {
+        "nama": nama,
+        "expired": new_exp_str,
+        "updated_at": datetime.now(WIB).strftime("%Y-%m-%d %H:%M WIB")
+    }
+
+    _, sync_msg = await asyncio.to_thread(sync_users_to_github)
+
+    await update.message.reply_html(
+        "🔄 <b>MASA AKTIF DIPERPANJANG</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"🆔 ID: <code>{target_id}</code>\n"
+        f"👤 Nama: <b>{html.escape(nama)}</b>\n"
+        f"➕ Tambahan: <b>+{add_days} hari</b>\n"
+        f"📅 Expired Baru: <b>{new_exp_str}</b> (Sisa {sisa_hari} hari)\n"
+        f"☁️ Status: <i>{html.escape(sync_msg)}</i>"
+    )
+
+
+async def cmd_delete_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_admin(user.id):
+        await update.message.reply_text("⛔ Perintah ini khusus Admin.")
+        return
+
+    args = context.args or []
+    if len(args) < 1 or not args[0].isdigit():
+        await update.message.reply_html(
+            "⚠️ Format salah.\nContoh: <code>/hapus 987654321</code>"
+        )
+        return
+
+    target_id = args[0].strip()
+    removed = USERS_DB["members"].pop(target_id, None)
+
+    if not removed:
+        await update.message.reply_html(
+            f"ℹ️ ID <code>{target_id}</code> tidak ditemukan di daftar member."
+        )
+        return
+
+    _, sync_msg = await asyncio.to_thread(sync_users_to_github)
+    nama = removed.get("nama", "Member")
+
+    await update.message.reply_html(
+        "🗑️ <b>MEMBER DIHAPUS</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"🆔 ID: <code>{target_id}</code>\n"
+        f"👤 Nama: <b>{html.escape(nama)}</b>\n"
+        f"☁️ Status: <i>{html.escape(sync_msg)}</i>"
+    )
+
+
+async def cmd_check_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_admin(user.id):
+        await update.message.reply_text("⛔ Perintah ini khusus Admin.")
+        return
+
+    args = context.args or []
+    if len(args) < 1 or not args[0].isdigit():
+        await update.message.reply_html(
+            "⚠️ Format salah.\nContoh: <code>/cekuser 987654321</code>"
+        )
+        return
+
+    target_id = args[0].strip()
+    member = USERS_DB["members"].get(target_id)
+    today = today_wib_date()
+
+    if int(target_id) in USERS_DB["admin_ids"]:
+        await update.message.reply_html(
+            f"🆔 ID: <code>{target_id}</code>\n👑 Status: <b>ADMIN UTAMA</b>"
+        )
+        return
+
+    if isinstance(member, dict):
+        nama = html.escape(str(member.get("nama", "Member VIP")))
+        exp_str = str(member.get("expired", "-"))
+        exp_date = parse_date_ymd(exp_str)
+
+        if exp_date and today <= exp_date:
+            sisa = (exp_date - today).days
+            status_badge = f"🟢 AKTIF (Sisa {sisa} hari)"
+        else:
+            status_badge = "🔴 EXPIRED (Habis)"
+
+        await update.message.reply_html(
+            "🔍 <b>DETAIL MEMBER</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 ID: <code>{target_id}</code>\n"
+            f"👤 Nama: <b>{nama}</b>\n"
+            f"📌 Status: <b>{status_badge}</b>\n"
+            f"📅 Expired: <b>{html.escape(exp_str)}</b>"
+        )
+    else:
+        used = int(USERS_DB["trials"].get(target_id, 0))
+        limit = int(USERS_DB["trial_limit"])
+        await update.message.reply_html(
+            "🔍 <b>DETAIL USER (NON-VIP)</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 ID: <code>{target_id}</code>\n"
+            f"📌 Status: <b>Belum Terdaftar VIP</b>\n"
+            f"🎁 Trial Terpakai: <b>{used}/{limit}</b>"
+        )
+
+
+async def cmd_list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_admin(user.id):
+        await update.message.reply_text("⛔ Perintah ini khusus Admin.")
+        return
+
+    members = USERS_DB["members"]
+    if not members:
+        await update.message.reply_text("📭 Belum ada member VIP yang terdaftar.")
+        return
+
+    today = today_wib_date()
+    rows = []
+
+    for uid_str, info in members.items():
+        nama = html.escape(str(info.get("nama", "Member")))
+        exp_str = str(info.get("expired", "-"))
+        exp_date = parse_date_ymd(exp_str)
+
+        if exp_date and today <= exp_date:
+            sisa = (exp_date - today).days
+            rows.append((0, sisa, f"🟢 <code>{uid_str}</code> • <b>{nama}</b>\n    └ Exp: {exp_str} (Sisa {sisa} hr)"))
+        else:
+            rows.append((1, 0, f"🔴 <code>{uid_str}</code> • <b>{nama}</b>\n    └ Exp: {exp_str} (HABIS)"))
+
+    rows.sort(key=lambda x: (x[0], -x[1]))
+
+    header = f"👥 <b>DAFTAR MEMBER VIP ({len(rows)} Orang)</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+    body = "\n".join(r[2] for r in rows)
+
+    full_msg = header + body
+    if len(full_msg) > 3900:
+        full_msg = full_msg[:3850] + "\n\n<i>...dan lainnya.</i>"
+
+    await update.message.reply_html(full_msg)
+
+
+async def cmd_set_trial(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_admin(user.id):
+        await update.message.reply_text("⛔ Perintah ini khusus Admin.")
+        return
+
+    args = context.args or []
+    if len(args) < 1 or not args[0].isdigit():
+        await update.message.reply_html(
+            "⚠️ Format salah.\nContoh: <code>/settrial 2</code> (atau <code>/settrial 0</code> untuk kunci tanpa trial)"
+        )
+        return
+
+    new_limit = int(args[0])
+    USERS_DB["trial_limit"] = new_limit
+    _, sync_msg = await asyncio.to_thread(sync_users_to_github)
+
+    mode_desc = "Kunci Total (Tanpa Trial)" if new_limit == 0 else f"{new_limit}x Analisa Gratis"
+
+    await update.message.reply_html(
+        "⚙️ <b>PENGATURAN TRIAL DIPERBARUI</b>\n"
+        f"Mode User Baru: <b>{mode_desc}</b>\n"
+        f"☁️ Status: <i>{html.escape(sync_msg)}</i>"
+    )
+
+
+async def cmd_set_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_admin(user.id):
+        await update.message.reply_text("⛔ Perintah ini khusus Admin.")
+        return
+
+    args = context.args or []
+    if len(args) < 1:
+        await update.message.reply_html(
+            "⚠️ Format salah.\nContoh: <code>/setcontact suryaditj</code>"
+        )
+        return
+
+    uname = args[0].strip().lstrip("@")
+    USERS_DB["admin_username"] = uname
+    _, sync_msg = await asyncio.to_thread(sync_users_to_github)
+
+    await update.message.reply_html(
+        "💬 <b>KONTAK ADMIN DIPERBARUI</b>\n"
+        f"Tombol aktivasi sekarang mengarah ke: <b>@{html.escape(uname)}</b>\n"
+        f"☁️ Status: <i>{html.escape(sync_msg)}</i>"
     )
 
 
@@ -1704,14 +2240,35 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     query = update.callback_query
+    user = query.from_user
 
     await query.answer()
 
     data = query.data
 
-    log.info("Callback: %s", data)
+    log.info("Callback [%s]: %s", user.id, data)
+
+    if data == "check_my_status":
+        allowed, _, status_info = check_user_access(user.id)
+        if allowed:
+            await query.message.reply_html(
+                f"✅ <b>AKSES AKTIF</b>\n"
+                f"🆔 ID Kamu: <code>{user.id}</code>\n"
+                f"📌 Status: <b>{html.escape(status_info)}</b>",
+                reply_markup=main_menu()
+            )
+        else:
+            text, markup = build_locked_message_and_markup(user)
+            await query.message.reply_html(text, reply_markup=markup)
+        return
 
     if data == "menu":
+
+        allowed, _, _ = check_user_access(user.id)
+        if not allowed:
+            text, markup = build_locked_message_and_markup(user)
+            await query.message.reply_html(text, reply_markup=markup)
+            return
 
         await query.message.reply_text(
             "Pilih market:",
@@ -1754,6 +2311,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("analyze_"):
 
+        allowed, role, _ = check_user_access(user.id)
+        if not allowed:
+            text, markup = build_locked_message_and_markup(user)
+            await query.message.reply_html(text, reply_markup=markup)
+            return
+
         _, symbol, timeframe = data.split("_")
 
         if symbol not in MARKETS or timeframe not in TIMEFRAMES:
@@ -1773,15 +2336,23 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 timeframe
             )
 
+            report_text = create_report(result)
+
+            if role == "TRIAL":
+                await asyncio.to_thread(consume_trial_if_needed, user.id)
+                _, _, new_status = check_user_access(user.id)
+                report_text += f"\n\n🎁 {new_status}"
+
             await processing.edit_text(
-                create_report(result),
+                report_text,
                 reply_markup=analysis_menu(symbol, timeframe)
             )
 
             log.info(
-                "Analisis selesai: %s %s",
+                "Analisis selesai: %s %s (user=%s)",
                 symbol,
-                timeframe
+                timeframe,
+                user.id
             )
 
         except Exception as error:
@@ -1798,6 +2369,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data in ("calendar", "calendar_refresh"):
+
+        allowed, _, _ = check_user_access(user.id)
+        if not allowed:
+            text, markup = build_locked_message_and_markup(user)
+            await query.message.reply_html(text, reply_markup=markup)
+            return
 
         force = (data == "calendar_refresh")
         has_cache = ("calendar" in RESPONSE_CACHE) and not force
@@ -1843,6 +2420,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data in ("news", "news_refresh"):
+
+        allowed, _, _ = check_user_access(user.id)
+        if not allowed:
+            text, markup = build_locked_message_and_markup(user)
+            await query.message.reply_html(text, reply_markup=markup)
+            return
 
         force = (data == "news_refresh")
         has_cache = ("news" in RESPONSE_CACHE) and not force
@@ -1914,6 +2497,7 @@ async def post_init(application):
     log.info("Candles: 100 CLOSED CANDLES (PURE SMC)")
     log.info("Strategy: OB Valid + FVG + BOS + SNR + SBR/RBS + SND + RBR/DBD")
     log.info("Gemini AI: %s", "ENABLED (Fast Mode)" if GEMINI_API_KEY else "DISABLED")
+    log.info("Admin IDs: %s | Members: %s", USERS_DB["admin_ids"], len(USERS_DB["members"]))
     log.info("======================================")
 
     bot_info = await application.bot.get_me()
@@ -1931,6 +2515,8 @@ def main():
         log.error("BOT_TOKEN tidak ditemukan!")
         sys.exit(1)
 
+    load_users_db()
+
     log.info("Membangun Telegram application...")
 
     application = (
@@ -1940,22 +2526,25 @@ def main():
         .build()
     )
 
-    application.add_handler(
-        CommandHandler("start", start)
-    )
+    # User Commands
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("status", status))
+    application.add_handler(CommandHandler("menu", menu_command))
 
-    application.add_handler(
-        CommandHandler("status", status)
-    )
+    # Admin Commands
+    application.add_handler(CommandHandler("claimadmin", claim_admin))
+    application.add_handler(CommandHandler("admin", admin_panel))
+    application.add_handler(CommandHandler("add", cmd_add_user))
+    application.add_handler(CommandHandler("perpanjang", cmd_extend_user))
+    application.add_handler(CommandHandler("extend", cmd_extend_user))
+    application.add_handler(CommandHandler("hapus", cmd_delete_user))
+    application.add_handler(CommandHandler("delete", cmd_delete_user))
+    application.add_handler(CommandHandler("cekuser", cmd_check_user))
+    application.add_handler(CommandHandler("listuser", cmd_list_users))
+    application.add_handler(CommandHandler("settrial", cmd_set_trial))
+    application.add_handler(CommandHandler("setcontact", cmd_set_contact))
 
-    application.add_handler(
-        CommandHandler("menu", menu_command)
-    )
-
-    application.add_handler(
-        CallbackQueryHandler(callback_handler)
-    )
-
+    application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_error_handler(error_handler)
 
     log.info("Menjalankan Telegram polling...")
