@@ -1,0 +1,49 @@
+name: MASTER SMC SCALPING BOT
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    - cron: "0 */6 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: master-smc-bot
+  cancel-in-progress: true
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install python-telegram-bot==21.10 requests==2.32.3
+
+      - name: Start Telegram Bot
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          set +e
+          timeout --signal=INT --kill-after=30s 5h50m python -u main.py
+          STATUS=$?
+
+          if [ "$STATUS" -eq 124 ] || [ "$STATUS" -eq 130 ]; then
+            echo "Bot selesai sesuai jadwal."
+            exit 0
+          fi
+
+          exit "$STATUS"
