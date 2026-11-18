@@ -5,15 +5,16 @@
 # TELEGRAM + BIQUOTE + GITHUB ACTIONS
 #
 # ANALISA CANDLE: 100% MURNI TEKNIKAL SMC (100 CLOSED CANDLES)
-# FVG + BOS + SNR + SBR/RBS + SND + RBR/DBD
+# OB VALID + FVG + BOS + SNR + SBR/RBS + SND + RBR/DBD
 #
 # KALENDER EKONOMI US & BERITA MARKET:
-# DIDUKUNG GEMINI AI (KHUSUS FUNDAMENTAL & ISU XAUUSD)
+# DIDUKUNG GEMINI AI FAST MODE + CACHE (KHUSUS ISU XAUUSD)
 # ============================================================
 
 import os
 import re
 import sys
+import time
 import json
 import html
 import logging
@@ -44,14 +45,18 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
 BASE_URL = "https://biquote.io"
 
+# Urutan model dari yang paling cepat (minimal thinking)
 GEMINI_MODELS = [
-    "gemini-3.8-flash",
-    "gemini-3.6-flash",
     "gemini-3.5-flash-lite",
-    "gemini-3-flash-preview"
+    "gemini-3.8-flash"
 ]
 
 LAST_GEMINI_ERROR = ""
+
+# Cache agar buka menu berulang langsung instan (< 0.1 detik)
+RESPONSE_CACHE = {}
+CALENDAR_CACHE_TTL = 900   # 15 menit
+NEWS_CACHE_TTL = 600       # 10 menit
 
 MARKETS = ["XAUUSD", "BTCUSD"]
 
@@ -95,7 +100,7 @@ log = logging.getLogger("SMC_BOT")
 SESSION = requests.Session()
 
 SESSION.headers.update({
-    "User-Agent": "Mozilla/5.0 SMC-Bot/2.4",
+    "User-Agent": "Mozilla/5.0 SMC-Bot/2.6",
     "Accept": "application/json"
 })
 
@@ -126,13 +131,13 @@ def api_get(endpoint, params=None):
 
 def call_gemini_json(prompt_text):
     """
-    Memanggil Gemini API khusus untuk analisa fundamental kalender ekonomi
-    dan berita market. Tidak digunakan untuk analisa candle.
+    Memanggil Gemini API mode cepat khusus untuk analisa fundamental
+    kalender ekonomi dan berita market. Tidak digunakan untuk analisa candle.
     """
     global LAST_GEMINI_ERROR
 
     if not GEMINI_API_KEY:
-        LAST_GEMINI_ERROR = "GEMINI_API_KEY belum terbaca di env workflow (.github/workflows/main.yml)."
+        LAST_GEMINI_ERROR = "GEMINI_API_KEY belum terbaca di env workflow (.github/workflows/bot.yml)."
         log.warning(LAST_GEMINI_ERROR)
         return None
 
@@ -145,7 +150,8 @@ def call_gemini_json(prompt_text):
             }
         ],
         "generationConfig": {
-            "temperature": 0.2,
+            "temperature": 0.15,
+            "maxOutputTokens": 1400,
             "responseMimeType": "application/json"
         }
     }
@@ -161,7 +167,7 @@ def call_gemini_json(prompt_text):
             f"{model_name}:generateContent"
         )
         try:
-            resp = SESSION.post(url, headers=headers, json=payload, timeout=25)
+            resp = SESSION.post(url, headers=headers, json=payload, timeout=18)
             if resp.status_code != 200:
                 err_msg = resp.text[:220]
                 LAST_GEMINI_ERROR = f"Model {model_name} gagal (HTTP {resp.status_code})"
@@ -432,6 +438,91 @@ def get_candles(symbol, timeframe):
     )
 
     return candles
+
+
+# ============================================================
+# SMC: VALID ORDER BLOCK (OB)
+# ============================================================
+
+def detect_ob(candles):
+    """
+    Mendeteksi Valid Order Block (OB):
+    1. Candle lawan arah terakhir sebelum dorongan impulsif.
+    2. Dorongan impulsif memicu Fair Value Gap (FVG / Imbalance).
+    3. Dorongan impulsif mematahkan struktur swing terdekat (BOS).
+    4. Zona OB belum ditembus (masih fresh) dan sedang di-retest harga saat ini.
+    """
+    recent = candles[-1]
+    price = recent["close"]
+
+    lookback = candles[-60:-1]
+    if len(lookback) < 12:
+        return "NEUTRAL", "-", None, None
+
+    avg_range = sum(c["high"] - c["low"] for c in lookback) / len(lookback)
+    if avg_range <= 0:
+        avg_range = price * 0.001
+
+    buffer = avg_range * 0.45
+
+    for i in range(len(lookback) - 4, 4, -1):
+        ob = lookback[i]
+        c1 = lookback[i + 1]
+        c2 = lookback[i + 2]
+
+        ob_low = ob["low"]
+        ob_high = ob["high"]
+
+        prev_slice = lookback[max(0, i - 8):i]
+        impulse_slice = lookback[i + 1: min(len(lookback), i + 4)]
+
+        # 1. Cek Valid Bullish OB (Candle Bearish sebelum lonjakan naik)
+        if ob["close"] < ob["open"]:
+            c1_range = c1["high"] - c1["low"]
+            c1_body = c1["close"] - c1["open"]
+
+            strong_impulse = (
+                c1_range > 0
+                and c1_body >= c1_range * 0.55
+                and c1["close"] > ob_high
+            )
+            has_fvg = c2["low"] > ob_high
+            prev_swing_high = max(c["high"] for c in prev_slice)
+            broke_structure = any(c["close"] > prev_swing_high for c in impulse_slice)
+
+            if strong_impulse and has_fvg and broke_structure:
+                # Pastikan zona OB belum ditembus ke bawah setelah terbentuk
+                invalidated = any(
+                    lookback[k]["close"] < ob_low - (buffer * 0.5)
+                    for k in range(i + 3, len(lookback))
+                )
+                if not invalidated and (ob_low - buffer <= price <= ob_high + buffer):
+                    return "BUY", "Bullish OB", ob_low, ob_high
+
+        # 2. Cek Valid Bearish OB (Candle Bullish sebelum penurunan tajam)
+        if ob["close"] > ob["open"]:
+            c1_range = c1["high"] - c1["low"]
+            c1_body = c1["open"] - c1["close"]
+
+            strong_impulse = (
+                c1_range > 0
+                and c1_body >= c1_range * 0.55
+                and c1["close"] < ob_low
+            )
+            has_fvg = c2["high"] < ob_low
+            prev_swing_low = min(c["low"] for c in prev_slice)
+            broke_structure = any(c["close"] < prev_swing_low for c in impulse_slice)
+
+            if strong_impulse and has_fvg and broke_structure:
+                # Pastikan zona OB belum ditembus ke atas setelah terbentuk
+                invalidated = any(
+                    lookback[k]["close"] > ob_high + (buffer * 0.5)
+                    for k in range(i + 3, len(lookback))
+                )
+                if not invalidated and (ob_low - buffer <= price <= ob_high + buffer):
+                    return "SELL", "Bearish OB", ob_low, ob_high
+
+    return "NEUTRAL", "-", None, None
 
 
 # ============================================================
@@ -742,6 +833,7 @@ def analyze_market(symbol, timeframe):
     last = candles[-1]
     price = last["close"]
 
+    ob, ob_type, ob_low, ob_high = detect_ob(candles)
     fvg, fvg_low, fvg_high = detect_fvg(candles)
     bos = detect_bos(candles)
     snr, snr_level = detect_snr(candles)
@@ -750,6 +842,7 @@ def analyze_market(symbol, timeframe):
     rbr_dbd, rbr_dbd_type, rbr_dbd_low, rbr_dbd_high = detect_rbr_dbd(candles)
 
     signals = {
+        "OB": ob,
         "FVG": fvg,
         "BOS": bos,
         "SNR": snr,
@@ -846,6 +939,9 @@ def analyze_market(symbol, timeframe):
         "tp2": tp2,
         "tp3": tp3,
         "candle_count": len(candles),
+        "ob_type": ob_type,
+        "ob_low": ob_low,
+        "ob_high": ob_high,
         "fvg_low": fvg_low,
         "fvg_high": fvg_high,
         "snr_level": snr_level,
@@ -886,6 +982,20 @@ def create_report(result):
         "WAIT": "⚪"
     }.get(direction, "⚪")
 
+    ob_sig = result["signals"]["OB"]
+    if (
+        ob_sig != "NEUTRAL"
+        and result["ob_low"] is not None
+        and result["ob_high"] is not None
+    ):
+        ob_text = (
+            f"{ob_sig} ({result['ob_type']} @ "
+            f"{format_price(result['ob_low'])} - "
+            f"{format_price(result['ob_high'])})"
+        )
+    else:
+        ob_text = ob_sig
+
     sbr_rbs_sig = result["signals"]["SBR_RBS"]
     if sbr_rbs_sig != "NEUTRAL" and result["sbr_rbs_level"] is not None:
         sbr_rbs_text = (
@@ -922,6 +1032,7 @@ def create_report(result):
         f"Konfirmasi: {result['confirmations']}/{result['total_indicators']}",
         "",
         "📌 KONFIRMASI SMC & PRICE ACTION",
+        f"OB Valid: {ob_text}",
         f"FVG: {result['signals']['FVG']}",
         f"BOS: {result['signals']['BOS']}",
         f"SNR: {result['signals']['SNR']}",
@@ -955,7 +1066,7 @@ def create_report(result):
 
 
 # ============================================================
-# CALENDAR & NEWS (US FOCUS + GEMINI AI FUNDAMENTAL XAUUSD)
+# CALENDAR & NEWS (US FOCUS + GEMINI AI FAST MODE + CACHE)
 # ============================================================
 
 def get_calendar():
@@ -970,7 +1081,7 @@ def get_news():
         params={
             "language": "en",
             "country": "US",
-            "maxResults": 12
+            "maxResults": 8
         }
     )
 
@@ -1010,31 +1121,15 @@ def _impact_rank_and_badge(raw_impact, title_en):
 
 def _analyze_calendar_with_gemini(events_payload):
     """
-    Meminta Gemini menganalisa daftar jadwal ekonomi US secara kontekstual
-    khusus untuk pergerakan Emas (XAUUSD) dalam bahasa awam yang mudah dipahami.
+    Prompt ringkas agar Gemini menjawab super cepat (< 2 detik).
     """
     prompt = (
-        "Kamu adalah analis fundamental khusus Emas (XAUUSD) yang menjelaskan ke pemula dengan bahasa Indonesia sehari-hari yang sangat mudah dipahami (hindari istilah rumit seperti hawkish/dovish/yield).\n"
-        "Analisa daftar jadwal ekonomi US berikut ini:\n"
-        f"{json.dumps(events_payload, ensure_ascii=False)}\n\n"
-        "Aturan penilaian:\n"
-        "1. Bedakan mana berita yang benar-benar penggerak Emas (Inflasi CPI/PPI/PCE, Suku Bunga The Fed/FOMC, Tenaga Kerja NFP/Jobless Claims, GDP, PMI) dan mana yang efeknya kecil ke emas (seperti stok minyak EIA Crude Oil, stok gas, dll).\n"
-        "2. Jika 'actual' sudah ada isinya (bukan kosong), bandingkan 'actual' vs 'forecast' dan tentukan apakah harga Emas (XAUUSD) berpotensi NAIK, TURUN, atau DATAR beserta estimasi persentasenya (misal 80%, 65%, 55%, 50%).\n"
-        "3. Jika 'actual' belum keluar, berikan panduan skenario sederhana jika hasil lebih tinggi vs lebih rendah dari perkiraan.\n\n"
-        "Kembalikan HANYA JSON array dengan urutan index yang sama persis, setiap elemen memiliki format:\n"
-        "{\n"
-        '  "index": 0,\n'
-        '  "title_id": "Terjemahan nama berita dalam Bahasa Indonesia",\n'
-        '  "gold_relevance": "HIGH" | "MEDIUM" | "LOW",\n'
-        '  "summary_awam": "1 kalimat sederhana apa maksud laporan ini & seberapa kuat efeknya ke harga emas",\n'
-        '  "is_released": true atau false,\n'
-        '  "released_direction": "NAIK" | "TURUN" | "DATAR",\n'
-        '  "released_pct": "80%",\n'
-        '  "released_reason": "Alasan singkat bahasa awam jika hasil sudah keluar",\n'
-        '  "if_higher_dir": "TURUN" atau "NAIK",\n'
-        '  "if_lower_dir": "NAIK" atau "TURUN",\n'
-        '  "scenario_pct": "80%"\n'
-        "}"
+        "Analis fundamental Emas (XAUUSD) untuk pemula (bahasa Indonesia sehari-hari, singkat, jelas).\n"
+        f"Data jadwal US: {json.dumps(events_payload, ensure_ascii=False)}\n"
+        "Aturan: Bedakan penggerak utama emas (CPI/PPI/PCE, Fed/FOMC, NFP/Jobless, GDP, PMI) vs efek kecil ke emas (EIA Crude Oil dll).\n"
+        "Jika 'actual' ada isi, bandingkan vs 'forecast' (NAIK/TURUN/DATAR + %). Jika 'actual' kosong, beri arah jika hasil lebih tinggi vs lebih rendah.\n"
+        "Kembalikan JSON array urut index:\n"
+        '[{"index":0,"title_id":"Terjemahan","gold_relevance":"HIGH|MEDIUM|LOW","summary_awam":"1 kalimat singkat efeknya ke emas","is_released":false,"released_direction":"NAIK|TURUN|DATAR","released_pct":"80%","released_reason":"Singkat","if_higher_dir":"TURUN|NAIK","if_lower_dir":"NAIK|TURUN","scenario_pct":"80%"}]'
     )
 
     res = call_gemini_json(prompt)
@@ -1053,7 +1148,6 @@ def format_calendar_data(data):
     if not items:
         return "<b>📅 KALENDER EKONOMI US</b>\n\nBelum ada jadwal rilis data."
 
-    # 1. Filter khusus US / USD
     us_items = []
     for item in items:
         if not isinstance(item, dict):
@@ -1116,22 +1210,20 @@ def format_calendar_data(data):
         )
     )
 
-    top_events = active_list[:7]
+    top_events = active_list[:6]
 
     gemini_input = []
     for idx, (dt_wib, rank, badge, title_en, item) in enumerate(top_events):
         gemini_input.append({
             "index": idx,
             "title": title_en,
-            "raw_impact": str(item.get("impact") or item.get("importance") or ""),
             "actual": str(item.get("actual") or ""),
             "forecast": str(
                 item.get("forecast")
                 or item.get("consensus")
                 or item.get("estimate")
                 or ""
-            ),
-            "previous": str(item.get("previous") or item.get("prior") or "")
+            )
         })
 
     ai_map = _analyze_calendar_with_gemini(gemini_input)
@@ -1259,29 +1351,14 @@ def format_calendar_data(data):
 
 def _analyze_news_with_gemini(news_payload):
     """
-    Meminta Gemini membaca isu berita market secara menyeluruh,
-    memilah yang paling berdampak pada XAUUSD, dan merangkumnya
-    dalam bahasa awam yang mudah dipahami.
+    Prompt ringkas agar Gemini menjawab cepat (< 2 detik).
     """
     prompt = (
-        "Kamu adalah analis pasar keuangan yang menerjemahkan dan menjelaskan berita market AS kepada pemula dengan bahasa Indonesia sehari-hari yang sangat jelas dan mudah dipahami.\n"
-        "Baca daftar berita berikut ini:\n"
-        f"{json.dumps(news_payload, ensure_ascii=False)}\n\n"
-        "Tugasmu:\n"
-        "1. Pahami isu utama setiap berita (misal: kebijakan suku bunga The Fed, inflasi, nilai Dolar AS, perang/geopolitik, ekonomi AS, saham, atau komoditas).\n"
-        "2. Pilih maksimal 6 berita paling penting, UTAMAKAN berita yang paling memengaruhi harga Emas (XAUUSD).\n"
-        "3. Tentukan apakah isu berita tersebut membuat harga Emas (XAUUSD) cenderung NAIK, TURUN, atau NETRAL (tidak langsung berdampak), beserta estimasi persentasenya (misal 80%, 75%, 65%, 50%).\n"
-        "4. Jelaskan inti isunya dalam 1-2 kalimat singkat bahasa awam tanpa istilah rumit.\n\n"
-        "Kembalikan HANYA JSON array berisi maksimal 6 objek dengan format:\n"
-        "{\n"
-        '  "index": 0,\n'
-        '  "is_gold_focus": true atau false,\n'
-        '  "title_id": "Judul berita dalam Bahasa Indonesia yang jelas",\n'
-        '  "issue_summary": "Inti isu berita dalam 1-2 kalimat bahasa awam",\n'
-        '  "gold_direction": "NAIK" | "TURUN" | "NETRAL",\n'
-        '  "probability_pct": "75%",\n'
-        '  "gold_reason": "Alasan singkat kenapa isu ini bikin emas naik/turun/netral"\n'
-        "}"
+        "Analis pasar untuk pemula (bahasa Indonesia sehari-hari, singkat, jelas).\n"
+        f"Berita US: {json.dumps(news_payload, ensure_ascii=False)}\n"
+        "Pilih maksimal 5 berita terpenting (utamakan penggerak Emas XAUUSD: The Fed, inflasi, Dolar AS, geopolitik). Tentukan efek ke emas (NAIK/TURUN/NETRAL + %).\n"
+        "Kembalikan JSON array:\n"
+        '[{"index":0,"is_gold_focus":true,"title_id":"Judul ID","issue_summary":"1 kalimat inti isu","gold_direction":"NAIK|TURUN|NETRAL","probability_pct":"75%","gold_reason":"Alasan singkat"}]'
     )
 
     res = call_gemini_json(prompt)
@@ -1326,15 +1403,15 @@ def format_news_data(data):
         summary_en = re.sub(r"<[^>]+>", "", summary_en)
         summary_en = re.sub(r"\s+", " ", summary_en).strip()
 
-        if len(summary_en) > 260:
-            summary_en = summary_en[:257].rsplit(" ", 1)[0] + "..."
+        if len(summary_en) > 160:
+            summary_en = summary_en[:157].rsplit(" ", 1)[0] + "..."
 
         valid_items.append((title_en, summary_en, item))
 
     if not valid_items:
         return "<b>📰 BERITA MARKET US &amp; EMAS (XAUUSD)</b>\n\nBelum ada berita valid."
 
-    sample_items = valid_items[:10]
+    sample_items = valid_items[:7]
     gemini_input = [
         {
             "index": idx,
@@ -1364,7 +1441,7 @@ def format_news_data(data):
     current_len = len(header) + len(footer)
 
     if ai_active:
-        for order_num, ai_item in enumerate(ai_news_list[:6]):
+        for order_num, ai_item in enumerate(ai_news_list[:5]):
             orig_idx = ai_item.get("index", 0)
             if not isinstance(orig_idx, int) or orig_idx < 0 or orig_idx >= len(sample_items):
                 orig_idx = min(order_num, len(sample_items) - 1)
@@ -1417,9 +1494,9 @@ def format_news_data(data):
     else:
         diag_note = html.escape(
             LAST_GEMINI_ERROR
-            or "Pastikan GEMINI_API_KEY sudah ditambahkan di GitHub Secrets & file main.yml."
+            or "Pastikan GEMINI_API_KEY sudah ditambahkan di GitHub Secrets & file bot.yml."
         )
-        for idx, (title_en, summary_en, raw_item) in enumerate(sample_items[:6]):
+        for idx, (title_en, summary_en, raw_item) in enumerate(sample_items[:5]):
             source = html.escape(
                 str(
                     raw_item.get("source")
@@ -1446,6 +1523,30 @@ def format_news_data(data):
             current_len += len(block)
 
     return header + "".join(body_blocks) + footer
+
+
+def get_cached_calendar(force_refresh=False):
+    now_ts = time.time()
+    cached = RESPONSE_CACHE.get("calendar")
+    if not force_refresh and cached and (now_ts - cached[0] < CALENDAR_CACHE_TTL):
+        return cached[1]
+
+    raw_result = get_calendar()
+    formatted = format_calendar_data(raw_result)
+    RESPONSE_CACHE["calendar"] = (now_ts, formatted)
+    return formatted
+
+
+def get_cached_news(force_refresh=False):
+    now_ts = time.time()
+    cached = RESPONSE_CACHE.get("news")
+    if not force_refresh and cached and (now_ts - cached[0] < NEWS_CACHE_TTL):
+        return cached[1]
+
+    raw_result = get_news()
+    formatted = format_news_data(raw_result)
+    RESPONSE_CACHE["news"] = (now_ts, formatted)
+    return formatted
 
 
 # ============================================================
@@ -1566,7 +1667,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 MASTER SMC SCALPING BOT\n\n"
         "Pilih market untuk memulai analisis.\n"
-        "• Analisa Chart: 100% Murni SMC (100 candle tertutup)\n"
+        "• Analisa Chart: 100% Murni SMC (OB Valid + FVG + BOS + SNR + SBR/RBS + SND + RBR/DBD)\n"
         "• Kalender & Berita: Analisa Fundamental Gemini AI",
         reply_markup=main_menu()
     )
@@ -1577,12 +1678,12 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if GEMINI_API_KEY:
         ai_status = f"Terdeteksi (Akhiran ...{GEMINI_API_KEY[-4:]})"
     else:
-        ai_status = "TIDAK TERDETEKSI (Cek main.yml & GitHub Secrets)"
+        ai_status = "TIDAK TERDETEKSI (Cek bot.yml & GitHub Secrets)"
 
     await update.message.reply_text(
         "🟢 BOT ONLINE\n"
         "Telegram polling aktif.\n"
-        "Analisa Candle: Murni SMC (Tanpa AI).\n"
+        "Analisa Candle: Murni SMC (OB Valid + 6 Metode).\n"
         f"GEMINI_API_KEY: {ai_status}.\n"
         "Market: XAUUSD dan BTCUSD."
     )
@@ -1696,24 +1797,38 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return
 
-    if data == "calendar":
+    if data in ("calendar", "calendar_refresh"):
+
+        force = (data == "calendar_refresh")
+        has_cache = ("calendar" in RESPONSE_CACHE) and not force
+
+        if has_cache:
+            try:
+                formatted_text = get_cached_calendar(force_refresh=False)
+                await query.message.reply_text(
+                    formatted_text,
+                    parse_mode="HTML",
+                    reply_markup=info_menu("calendar_refresh")
+                )
+                return
+            except Exception:
+                pass
 
         message = await query.message.reply_text(
-            "⏳ Mengambil & menganalisa jadwal ekonomi US..."
+            "⏳ Mengambil jadwal ekonomi US..."
         )
 
         try:
 
-            raw_result = await asyncio.to_thread(get_calendar)
             formatted_text = await asyncio.to_thread(
-                format_calendar_data,
-                raw_result
+                get_cached_calendar,
+                force
             )
 
             await message.edit_text(
                 formatted_text,
                 parse_mode="HTML",
-                reply_markup=info_menu("calendar")
+                reply_markup=info_menu("calendar_refresh")
             )
 
         except Exception as error:
@@ -1722,29 +1837,43 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await message.edit_text(
                 f"❌ Kalender gagal:\n{str(error)[:2000]}",
-                reply_markup=info_menu("calendar")
+                reply_markup=info_menu("calendar_refresh")
             )
 
         return
 
-    if data == "news":
+    if data in ("news", "news_refresh"):
+
+        force = (data == "news_refresh")
+        has_cache = ("news" in RESPONSE_CACHE) and not force
+
+        if has_cache:
+            try:
+                formatted_text = get_cached_news(force_refresh=False)
+                await query.message.reply_text(
+                    formatted_text,
+                    parse_mode="HTML",
+                    reply_markup=info_menu("news_refresh")
+                )
+                return
+            except Exception:
+                pass
 
         message = await query.message.reply_text(
-            "⏳ Membaca & menganalisa isu berita market US..."
+            "⏳ Membaca berita market US..."
         )
 
         try:
 
-            raw_result = await asyncio.to_thread(get_news)
             formatted_text = await asyncio.to_thread(
-                format_news_data,
-                raw_result
+                get_cached_news,
+                force
             )
 
             await message.edit_text(
                 formatted_text,
                 parse_mode="HTML",
-                reply_markup=info_menu("news")
+                reply_markup=info_menu("news_refresh")
             )
 
         except Exception as error:
@@ -1753,7 +1882,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await message.edit_text(
                 f"❌ Berita gagal:\n{str(error)[:2000]}",
-                reply_markup=info_menu("news")
+                reply_markup=info_menu("news_refresh")
             )
 
         return
@@ -1783,8 +1912,8 @@ async def post_init(application):
     log.info("Markets: XAUUSD, BTCUSD")
     log.info("Timeframes: M1 M5 M15 M30 H1 H4")
     log.info("Candles: 100 CLOSED CANDLES (PURE SMC)")
-    log.info("Strategy: FVG + BOS + SNR + SBR/RBS + SND + RBR/DBD")
-    log.info("Gemini AI: %s", "ENABLED (Calendar & News)" if GEMINI_API_KEY else "DISABLED")
+    log.info("Strategy: OB Valid + FVG + BOS + SNR + SBR/RBS + SND + RBR/DBD")
+    log.info("Gemini AI: %s", "ENABLED (Fast Mode)" if GEMINI_API_KEY else "DISABLED")
     log.info("======================================")
 
     bot_info = await application.bot.get_me()
