@@ -9,5 +9,7 @@
   "trials": {},
   "risk_profiles": {},
   "price_alerts": [],
-  "signal_subs": {}
+  "signal_subs": {
+    "7565078792": "ALL"
+  }
 }
