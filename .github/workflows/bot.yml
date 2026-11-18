@@ -10,7 +10,7 @@ on:
       - .github/workflows/bot.yml
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: master-smc-scalping-bot
@@ -44,6 +44,7 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PYTHONUNBUFFERED: "1"
         run: |
           set +e
