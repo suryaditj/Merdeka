@@ -104,23 +104,55 @@ def get_latest_price(symbol):
 
 
 # ============================================================
-# RADAR SESI KILLZONES & LIQUIDITY SWEEP (BSL / SSL)
+# RADAR SESI KILLZONES & CEK KEAMANAN PENDING LIMIT
 # ============================================================
 
 def get_session_killzone_info(symbol):
     now_wib = datetime.now(WIB)
     hour = now_wib.hour
+    minute = now_wib.minute
+    total_min = hour * 60 + minute
     jam_str = now_wib.strftime("%H:%M WIB")
 
+    # Cek jam rawan pembukaan sesi utama (London Open 13:45-15:30 & NY Open 19:15-21:30 WIB)
+    is_london_open = (13 * 60 + 45) <= total_min <= (15 * 60 + 30)
+    is_ny_open = (19 * 60 + 15) <= total_min <= (21 * 60 + 30)
+
+    if is_ny_open:
+        return (
+            f"🚨 NEW YORK OPEN ({jam_str}) — Volatilitas Ekstrem",
+            False,
+            "WASPADA NY OPEN (Hindari Limit Buta, Tunggu Rejection M5)"
+        )
+    if is_london_open:
+        return (
+            f"⚠️ LONDON OPEN ({jam_str}) — Rawan Sapuan Likuiditas",
+            False,
+            "WASPADA LONDON OPEN (Gunakan Konfirmasi Rejection M5)"
+        )
     if 19 <= hour < 23:
-        return f"🔥 PRIME KILLZONE ({jam_str}) — Overlap London & NY (Volume Institusi Tertinggi)"
+        return (
+            f"🔥 PRIME KILLZONE ({jam_str}) — Overlap London & NY",
+            True,
+            "AMAN PASANG LIMIT (Pantau Berita US)"
+        )
     if 14 <= hour < 19:
-        return f"⚡ LONDON SESSION ({jam_str}) — Likuiditas Mulai Meningkat"
-    if 23 <= hour or hour < 2:
-        return f"🇺🇸 NEW YORK SESSION ({jam_str}) — Volatilitas Aktif"
+        return (
+            f"⚡ LONDON SESSION ({jam_str}) — Struktur Rapi",
+            True,
+            "AMAN PASANG LIMIT (Zona Struktur Efektif)"
+        )
     if symbol == "BTCUSD":
-        return f"🌐 CRYPTO 24/7 SESSION ({jam_str}) — Likuiditas Berjalan"
-    return f"🌙 ASIA SESSION ({jam_str}) — Volume Tipis (Waspada Sideways Emas)"
+        return (
+            f"🌐 CRYPTO 24/7 SESSION ({jam_str}) — Likuiditas Stabil",
+            True,
+            "AMAN PASANG LIMIT"
+        )
+    return (
+        f"🌙 ASIA SESSION ({jam_str}) — Range Tenang",
+        True,
+        "AMAN PASANG LIMIT (Ideal untuk Pantulan Range)"
+    )
 
 
 def detect_liquidity_sweep(candles):
@@ -141,6 +173,115 @@ def detect_liquidity_sweep(candles):
     if swept_high and not swept_low:
         return "SELL", f"BSL Swept @ {format_price(prev_high)} (Potensi Reversal Turun)"
     return "NEUTRAL", "Belum ada sweep signifikan"
+
+
+# ============================================================
+# ZONA JEMPUTAN (UNMITIGATED SELL LIMIT & BUY LIMIT)
+# ============================================================
+
+def find_pending_limit_zones(candles):
+    """
+    Mencari zona ekstrem belum tersentuh (Unmitigated OB / Supply / Demand / Swing)
+    di atas harga saat ini (untuk SELL LIMIT) dan di bawah harga saat ini (untuk BUY LIMIT).
+    """
+    price = candles[-1]["close"]
+    lookback = candles[-80:-1]
+
+    recent_14 = candles[-14:]
+    avg_range = sum(c["high"] - c["low"] for c in recent_14) / len(recent_14)
+    if avg_range <= 0:
+        avg_range = price * 0.001
+
+    sell_limit_zone = None
+    buy_limit_zone = None
+
+    # 1. Cari Unmitigated Bearish OB / Supply di ATAS harga sekarang (SELL LIMIT)
+    for i in range(len(lookback) - 3, 3, -1):
+        c = lookback[i]
+        c1 = lookback[i + 1]
+        if c["close"] > c["open"]:
+            c1_rng = c1["high"] - c1["low"]
+            c1_body = c1["open"] - c1["close"]
+            if c1_rng > 0 and c1_body >= c1_rng * 0.55 and c1["close"] < c["low"]:
+                z_low = c["low"]
+                z_high = c["high"]
+                if z_low > price + (avg_range * 0.25):
+                    mitigated = any(lookback[k]["high"] >= z_low for k in range(i + 2, len(lookback)))
+                    if not mitigated:
+                        if sell_limit_zone is None or z_low < sell_limit_zone["entry_low"]:
+                            sl = z_high + avg_range * 1.1
+                            risk = sl - z_low
+                            sell_limit_zone = {
+                                "label": "Unmitigated Bearish OB",
+                                "entry_low": z_low,
+                                "entry_high": z_high,
+                                "sl": sl,
+                                "tp1": z_low - risk * 1.5,
+                                "tp2": z_low - risk * 2.5
+                            }
+
+    # Fallback jika belum ada Bearish OB di atas -> gunakan Strong Swing High terdekat di atas
+    if sell_limit_zone is None:
+        above_highs = [c["high"] for c in lookback if c["high"] > price + (avg_range * 0.4)]
+        if above_highs:
+            top_res = max(above_highs[-15:]) if len(above_highs) >= 15 else max(above_highs)
+            z_low = top_res - avg_range * 0.25
+            z_high = top_res
+            sl = z_high + avg_range * 1.1
+            risk = sl - z_low
+            sell_limit_zone = {
+                "label": "Major Supply / Swing High",
+                "entry_low": z_low,
+                "entry_high": z_high,
+                "sl": sl,
+                "tp1": z_low - risk * 1.5,
+                "tp2": z_low - risk * 2.5
+            }
+
+    # 2. Cari Unmitigated Bullish OB / Demand di BAWAH harga sekarang (BUY LIMIT)
+    for i in range(len(lookback) - 3, 3, -1):
+        c = lookback[i]
+        c1 = lookback[i + 1]
+        if c["close"] < c["open"]:
+            c1_rng = c1["high"] - c1["low"]
+            c1_body = c1["close"] - c1["open"]
+            if c1_rng > 0 and c1_body >= c1_rng * 0.55 and c1["close"] > c["high"]:
+                z_low = c["low"]
+                z_high = c["high"]
+                if z_high < price - (avg_range * 0.25):
+                    mitigated = any(lookback[k]["low"] <= z_high for k in range(i + 2, len(lookback)))
+                    if not mitigated:
+                        if buy_limit_zone is None or z_high > buy_limit_zone["entry_high"]:
+                            sl = z_low - avg_range * 1.1
+                            risk = z_high - sl
+                            buy_limit_zone = {
+                                "label": "Unmitigated Bullish OB",
+                                "entry_low": z_low,
+                                "entry_high": z_high,
+                                "sl": sl,
+                                "tp1": z_high + risk * 1.5,
+                                "tp2": z_high + risk * 2.5
+                            }
+
+    # Fallback jika belum ada Bullish OB di bawah -> gunakan Strong Swing Low terdekat di bawah
+    if buy_limit_zone is None:
+        below_lows = [c["low"] for c in lookback if c["low"] < price - (avg_range * 0.4)]
+        if below_lows:
+            bot_sup = min(below_lows[-15:]) if len(below_lows) >= 15 else min(below_lows)
+            z_low = bot_sup
+            z_high = bot_sup + avg_range * 0.25
+            sl = z_low - avg_range * 1.1
+            risk = z_high - sl
+            buy_limit_zone = {
+                "label": "Major Demand / Swing Low",
+                "entry_low": z_low,
+                "entry_high": z_high,
+                "sl": sl,
+                "tp1": z_high + risk * 1.5,
+                "tp2": z_high + risk * 2.5
+            }
+
+    return sell_limit_zone, buy_limit_zone
 
 
 # ============================================================
@@ -391,6 +532,8 @@ def analyze_market(symbol, timeframe):
     snd, snd_level = detect_snd(candles)
     rbr_dbd, rbr_dbd_type, rbr_dbd_low, rbr_dbd_high = detect_rbr_dbd(candles)
     sweep_dir, sweep_desc = detect_liquidity_sweep(candles)
+    sell_limit_zone, buy_limit_zone = find_pending_limit_zones(candles)
+    session_info, limit_safe, limit_note = get_session_killzone_info(symbol)
 
     signals = {
         "OB": ob,
@@ -471,10 +614,41 @@ def analyze_market(symbol, timeframe):
         "rbr_dbd_type": rbr_dbd_type,
         "rbr_dbd_low": rbr_dbd_low,
         "rbr_dbd_high": rbr_dbd_high,
-        "session_info": get_session_killzone_info(symbol),
+        "session_info": session_info,
+        "limit_safe": limit_safe,
+        "limit_note": limit_note,
         "sweep_dir": sweep_dir,
-        "sweep_desc": sweep_desc
+        "sweep_desc": sweep_desc,
+        "sell_limit_zone": sell_limit_zone,
+        "buy_limit_zone": buy_limit_zone
     }
+
+
+def _format_limit_zones_block(result, risk_profile=None):
+    slz = result.get("sell_limit_zone")
+    blz = result.get("buy_limit_zone")
+    badge = "✅" if result.get("limit_safe") else "⚠️"
+
+    lines = [
+        "",
+        f"🎣 ZONA JEMPUTAN (PENDING LIMIT)",
+        f"Status Limit: {badge} {result.get('limit_note', '-')}"
+    ]
+
+    if slz:
+        lines.append(
+            f"🔴 SELL LIMIT ({slz['label']}): "
+            f"{format_price(slz['entry_low'])} - {format_price(slz['entry_high'])} "
+            f"| SL: {format_price(slz['sl'])} | TP1: {format_price(slz['tp1'])}"
+        )
+    if blz:
+        lines.append(
+            f"🟢 BUY LIMIT ({blz['label']}): "
+            f"{format_price(blz['entry_low'])} - {format_price(blz['entry_high'])} "
+            f"| SL: {format_price(blz['sl'])} | TP1: {format_price(blz['tp1'])}"
+        )
+
+    return lines
 
 
 def create_report(result, risk_profile=None, title_prefix="📊 ANALISA SMC SCALPING PRO"):
@@ -507,7 +681,7 @@ def create_report(result, risk_profile=None, title_prefix="📊 ANALISA SMC SCAL
         f"Sesi: {result['session_info']}",
         f"Likuiditas: {result['sweep_desc']}",
         "",
-        f"{emoji} ARAH: {direction}",
+        f"{emoji} ARAH INSTAN: {direction}",
         f"Status: {result['status']} ({result['confirmations']}/{result['total_indicators']} Konfirmasi)",
         "",
         "📌 KONFIRMASI SMC & PRICE ACTION",
@@ -524,7 +698,7 @@ def create_report(result, risk_profile=None, title_prefix="📊 ANALISA SMC SCAL
         entry_mid = (result["entry_low"] + result["entry_high"]) / 2.0
         lines.extend([
             "",
-            "🎯 RENCANA LEVEL",
+            "🎯 RENCANA ENTRY INSTAN",
             f"• Entry: {format_price(result['entry_low'])} - {format_price(result['entry_high'])}",
             f"• Stop Loss: {format_price(result['sl'])}",
             f"• TP1: {format_price(result['tp1'])}",
@@ -547,13 +721,14 @@ def create_report(result, risk_profile=None, title_prefix="📊 ANALISA SMC SCAL
                     f"• Ukuran Lot: {lot_info['lot']:.2f} Lot",
                     f"• Est. Risiko SL: -${lot_info['actual_loss']:,.2f} | Target TP2: +${lot_info['tp2_profit']:,.2f}"
                 ])
-        else:
-            lines.append("\n💡 Atur modal otomatis ketik: /setrisk 500 1")
+
+    # Tambahkan Zona Jemputan (Pending Limit) di setiap laporan
+    lines.extend(_format_limit_zones_block(result, risk_profile))
 
     lines.extend([
         "",
         "━━━━━━━━━━━━━━━━━━",
-        "Skor = jumlah konfirmasi teknikal, bukan jaminan profit."
+        "Hapus pending limit menjelang buka sesi London/NY & rilis berita besar US."
     ])
 
     return "\n".join(lines)
@@ -572,7 +747,6 @@ def analyze_confluence_pro(symbol, risk_profile=None):
     dirs = [res_h4["direction"], res_h1["direction"], res_m15["direction"], res_m5["direction"]]
     buy_tf = dirs.count("BUY")
     sell_tf = dirs.count("SELL")
-
     scalp_dirs = [res_h1["direction"], res_m15["direction"], res_m5["direction"]]
 
     if buy_tf == 4:
@@ -586,7 +760,7 @@ def analyze_confluence_pro(symbol, risk_profile=None):
     elif res_h4["direction"] in ("BUY", "SELL") and res_m5["direction"] in ("BUY", "SELL") and res_h4["direction"] != res_m5["direction"]:
         verdict = f"⚠️ COUNTER-TREND RISK (M5 {res_m5['direction']} melawan tren H4 {res_h4['direction']})"
     else:
-        verdict = "⚪ BELUM ADA KESELARASAN KUAT (Tunggu Konfirmasi)"
+        verdict = "⚪ BELUM ADA KESELARASAN KUAT (Gunakan Zona Jemputan Limit)"
 
     def badge(r):
         ic = {"BUY": "🟢", "SELL": "🔴", "WAIT": "⚪"}.get(r["direction"], "⚪")
@@ -616,7 +790,7 @@ def analyze_confluence_pro(symbol, risk_profile=None):
         entry_mid = (exec_res["entry_low"] + exec_res["entry_high"]) / 2.0
         lines.extend([
             "",
-            f"🎯 RENCANA EKSEKUSI ({exec_res['timeframe']} — {exec_res['direction']})",
+            f"🎯 RENCANA EKSEKUSI INSTAN ({exec_res['timeframe']} — {exec_res['direction']})",
             f"• Entry: {format_price(exec_res['entry_low'])} - {format_price(exec_res['entry_high'])}",
             f"• Stop Loss: {format_price(exec_res['sl'])}",
             f"• TP1: {format_price(exec_res['tp1'])} | TP2: {format_price(exec_res['tp2'])} | TP3: {format_price(exec_res['tp3'])}"
@@ -636,6 +810,9 @@ def analyze_confluence_pro(symbol, risk_profile=None):
                     f"{lot_info['lot']:.2f} Lot (SL -${lot_info['actual_loss']:,.2f})"
                 )
 
+    # Zona Jemputan dari M15 agar presisi untuk Limit Order
+    lines.extend(_format_limit_zones_block(res_m15, risk_profile))
+
     lines.extend([
         "",
         "━━━━━━━━━━━━━━━━━━",
@@ -650,10 +827,6 @@ def analyze_confluence_pro(symbol, risk_profile=None):
 # ============================================================
 
 def check_triple_tf_signal(symbol):
-    """
-    Mengecek apakah H1, M15, dan M5 kompak searah (3/3 BUY atau 3/3 SELL)
-    dengan kekuatan minimal 4/7 konfirmasi SMC di M15 atau M5.
-    """
     res_h1 = analyze_market(symbol, "H1")
     res_m15 = analyze_market(symbol, "M15")
     res_m5 = analyze_market(symbol, "M5")
