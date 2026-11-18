@@ -124,10 +124,6 @@ def get_session_killzone_info(symbol):
 
 
 def detect_liquidity_sweep(candles):
-    """
-    Mendeteksi sapuan likuiditas (BSL / SSL) dalam 5 candle terakhir
-    terhadap swing high/low 30 candle sebelumnya.
-    """
     if len(candles) < 35:
         return "NEUTRAL", "Belum ada sapuan likuiditas"
 
@@ -172,7 +168,6 @@ def detect_ob(candles):
         prev_slice = lookback[max(0, i - 8):i]
         impulse_slice = lookback[i + 1: min(len(lookback), i + 4)]
 
-        # Valid Bullish OB
         if ob["close"] < ob["open"]:
             c1_range = c1["high"] - c1["low"]
             c1_body = c1["close"] - c1["open"]
@@ -189,7 +184,6 @@ def detect_ob(candles):
                 if not invalidated and (ob_low - buffer <= price <= ob_high + buffer):
                     return "BUY", "Bullish OB", ob_low, ob_high
 
-        # Valid Bearish OB
         if ob["close"] > ob["open"]:
             c1_range = c1["high"] - c1["low"]
             c1_body = c1["open"] - c1["close"]
@@ -370,7 +364,6 @@ def calculate_lot_recommendation(symbol, balance, risk_pct, entry_price, sl_pric
     if sl_dist <= 0:
         return None
 
-    # Kontrak standar forex/CFD: XAUUSD = 100 oz/lot, BTCUSD = 1 BTC/lot
     contract_size = 100.0 if symbol == "XAUUSD" else 1.0
     raw_lot = risk_usd / (sl_dist * contract_size)
     lot = max(0.01, round(raw_lot, 2))
@@ -567,26 +560,31 @@ def create_report(result, risk_profile=None, title_prefix="📊 ANALISA SMC SCAL
 
 
 # ============================================================
-# MULTI-TIMEFRAME CONFLUENCE PRO (H4 + H1 + M15)
+# MULTI-TIMEFRAME CONFLUENCE PRO (H4 + H1 + M15 + M5)
 # ============================================================
 
 def analyze_confluence_pro(symbol, risk_profile=None):
     res_h4 = analyze_market(symbol, "H4")
     res_h1 = analyze_market(symbol, "H1")
     res_m15 = analyze_market(symbol, "M15")
+    res_m5 = analyze_market(symbol, "M5")
 
-    dirs = [res_h4["direction"], res_h1["direction"], res_m15["direction"]]
+    dirs = [res_h4["direction"], res_h1["direction"], res_m15["direction"], res_m5["direction"]]
     buy_tf = dirs.count("BUY")
     sell_tf = dirs.count("SELL")
 
-    if buy_tf == 3:
-        verdict = "🟢 HIGH PROBABILITY BUY (3/3 TF SEARAH BULLISH)"
-    elif sell_tf == 3:
-        verdict = "🔴 HIGH PROBABILITY SELL (3/3 TF SEARAH BEARISH)"
-    elif res_h4["direction"] == res_h1["direction"] and res_h4["direction"] in ("BUY", "SELL"):
-        verdict = f"⚡ TREN UTAMA {res_h4['direction']} (H4 & H1 Searah, M15 {res_m15['direction']})"
-    elif res_h4["direction"] in ("BUY", "SELL") and res_m15["direction"] in ("BUY", "SELL") and res_h4["direction"] != res_m15["direction"]:
-        verdict = f"⚠️ COUNTER-TREND RISK (M15 {res_m15['direction']} melawan tren H4 {res_h4['direction']})"
+    scalp_dirs = [res_h1["direction"], res_m15["direction"], res_m5["direction"]]
+
+    if buy_tf == 4:
+        verdict = "🟢 PERFECT BUY CONFLUENCE (4/4 TF SEARAH BULLISH)"
+    elif sell_tf == 4:
+        verdict = "🔴 PERFECT SELL CONFLUENCE (4/4 TF SEARAH BEARISH)"
+    elif scalp_dirs == ["BUY", "BUY", "BUY"]:
+        verdict = "⚡ HIGH PROBABILITY SCALP BUY (H1 + M15 + M5 Searah)"
+    elif scalp_dirs == ["SELL", "SELL", "SELL"]:
+        verdict = "⚡ HIGH PROBABILITY SCALP SELL (H1 + M15 + M5 Searah)"
+    elif res_h4["direction"] in ("BUY", "SELL") and res_m5["direction"] in ("BUY", "SELL") and res_h4["direction"] != res_m5["direction"]:
+        verdict = f"⚠️ COUNTER-TREND RISK (M5 {res_m5['direction']} melawan tren H4 {res_h4['direction']})"
     else:
         verdict = "⚪ BELUM ADA KESELARASAN KUAT (Tunggu Konfirmasi)"
 
@@ -597,21 +595,23 @@ def analyze_confluence_pro(symbol, risk_profile=None):
     lines = [
         f"⚡ ANALISA CONFLUENCE PRO — {symbol}",
         "━━━━━━━━━━━━━━━━━━",
-        f"Harga Saat Ini: {format_price(res_m15['price'])}",
-        f"Sesi: {res_m15['session_info']}",
-        f"Likuiditas M15: {res_m15['sweep_desc']}",
+        f"Harga Saat Ini: {format_price(res_m5['price'])}",
+        f"Sesi: {res_m5['session_info']}",
+        f"Likuiditas M5: {res_m5['sweep_desc']}",
         "",
-        "🧭 MATRIKS MULTI-TIMEFRAME",
-        f"• H4 (Tren Besar): {badge(res_h4)}",
+        "🧭 MATRIKS 4 TIMEFRAME (H4 • H1 • M15 • M5)",
+        f"• H4 (Tren Utama): {badge(res_h4)}",
         f"• H1 (Struktur Intraday): {badge(res_h1)}",
-        f"• M15 (Zona Eksekusi): {badge(res_m15)}",
+        f"• M15 (Zona Setup): {badge(res_m15)}",
+        f"• M5 (Trigger Scalping): {badge(res_m5)}",
         "",
         "🏆 KESIMPULAN CONFLUENCE",
         verdict
     ]
 
-    # Gunakan level eksekusi dari M15 jika aktif, atau fallback ke H1
-    exec_res = res_m15 if res_m15["direction"] in ("BUY", "SELL") else res_h1
+    exec_res = res_m5 if res_m5["direction"] in ("BUY", "SELL") else (
+        res_m15 if res_m15["direction"] in ("BUY", "SELL") else res_h1
+    )
     if exec_res["direction"] in ("BUY", "SELL"):
         entry_mid = (exec_res["entry_low"] + exec_res["entry_high"]) / 2.0
         lines.extend([
@@ -639,7 +639,89 @@ def analyze_confluence_pro(symbol, risk_profile=None):
     lines.extend([
         "",
         "━━━━━━━━━━━━━━━━━━",
-        "Gunakan kombinasi H4 + H1 sebagai arah utama sebelum entry M15."
+        "Kombinasi terbaik: H4/H1 untuk arah tren, M15/M5 untuk presisi entry."
+    ])
+
+    return "\n".join(lines)
+
+
+# ============================================================
+# AUTO-SCANNER 3 TF (H1 + M15 + M5)
+# ============================================================
+
+def check_triple_tf_signal(symbol):
+    """
+    Mengecek apakah H1, M15, dan M5 kompak searah (3/3 BUY atau 3/3 SELL)
+    dengan kekuatan minimal 4/7 konfirmasi SMC di M15 atau M5.
+    """
+    res_h1 = analyze_market(symbol, "H1")
+    res_m15 = analyze_market(symbol, "M15")
+    res_m5 = analyze_market(symbol, "M5")
+
+    d_h1 = res_h1["direction"]
+    d_m15 = res_m15["direction"]
+    d_m5 = res_m5["direction"]
+
+    if d_h1 in ("BUY", "SELL") and d_h1 == d_m15 == d_m5:
+        if max(res_m15["confirmations"], res_m5["confirmations"]) >= 4:
+            return {
+                "symbol": symbol,
+                "direction": d_h1,
+                "h1": res_h1,
+                "m15": res_m15,
+                "m5": res_m5
+            }
+    return None
+
+
+def format_auto_signal_alert(sig_bundle, risk_profile=None):
+    sym = sig_bundle["symbol"]
+    direction = sig_bundle["direction"]
+    r_h1 = sig_bundle["h1"]
+    r_m15 = sig_bundle["m15"]
+    r_m5 = sig_bundle["m5"]
+
+    emoji = "🟢" if direction == "BUY" else "🔴"
+    entry_mid = (r_m5["entry_low"] + r_m5["entry_high"]) / 2.0
+
+    lines = [
+        f"🚨 SINYAL OTOMATIS 3-TF (H1 + M15 + M5) — {sym}",
+        "━━━━━━━━━━━━━━━━━━",
+        f"{emoji} ARAH KOMPAK: {direction} (3/3 TIMEFRAME SEARAH)",
+        f"Harga: {format_price(r_m5['price'])}",
+        f"Sesi: {r_m5['session_info']}",
+        "",
+        "📊 KEKUATAN KONFIRMASI SMC",
+        f"• H1 (Tren Intraday): {r_h1['direction']} ({r_h1['confirmations']}/7 • {r_h1['status']})",
+        f"• M15 (Zona Setup): {r_m15['direction']} ({r_m15['confirmations']}/7 • {r_m15['status']})",
+        f"• M5 (Trigger Scalping): {r_m5['direction']} ({r_m5['confirmations']}/7 • {r_m5['status']})",
+        "",
+        "🎯 RENCANA EKSEKUSI (ACUAN M5)",
+        f"• Entry: {format_price(r_m5['entry_low'])} - {format_price(r_m5['entry_high'])}",
+        f"• Stop Loss: {format_price(r_m5['sl'])}",
+        f"• TP1: {format_price(r_m5['tp1'])}",
+        f"• TP2: {format_price(r_m5['tp2'])}",
+        f"• TP3: {format_price(r_m5['tp3'])}"
+    ]
+
+    if risk_profile:
+        lot_info = calculate_lot_recommendation(
+            sym,
+            risk_profile.get("balance"),
+            risk_profile.get("risk_pct"),
+            entry_mid,
+            r_m5["sl"]
+        )
+        if lot_info:
+            lines.extend([
+                "",
+                f"💼 Rekomendasi Lot (${lot_info['balance']:,.0f} | Risk {lot_info['risk_pct']:.1f}%): {lot_info['lot']:.2f} Lot"
+            ])
+
+    lines.extend([
+        "",
+        "━━━━━━━━━━━━━━━━━━",
+        "Notifikasi otomatis dikirim karena H1, M15, dan M5 searah."
     ])
 
     return "\n".join(lines)
