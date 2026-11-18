@@ -113,7 +113,7 @@ def timeframe_menu(symbol):
 
 def analysis_menu(symbol, timeframe):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔍 ANALISA SEKARANG", callback_data=f"analyze_{symbol}_{timeframe}")],
+        [InlineKeyboardButton(f"🔄 Refresh {symbol} {timeframe}", callback_data=f"tf_{symbol}_{timeframe}")],
         [InlineKeyboardButton(f"⚡ Confluence Pro {symbol} (6 TF)", callback_data=f"conf_{symbol}")],
         [
             InlineKeyboardButton("⬅️ Ganti TF", callback_data=f"market_{symbol}"),
@@ -768,19 +768,38 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if symbol not in MARKETS:
             return
         await query.message.reply_text(
-            f"Market: {symbol}\nPilih timeframe atau jalankan Confluence Pro (6 TF: H4..M1):",
+            f"Market: {symbol}\nPilih timeframe (langsung analisa) atau Confluence Pro (6 TF):",
             reply_markup=timeframe_menu(symbol)
         )
         return
 
-    if data.startswith("tf_"):
+    if data.startswith("tf_") or data.startswith("analyze_"):
+        allowed, role, _ = check_user_access(user.id)
+        if not allowed:
+            text, markup = build_locked_message_and_markup(user)
+            await query.message.reply_html(text, reply_markup=markup)
+            return
+
         _, symbol, timeframe = data.split("_")
         if symbol not in MARKETS or timeframe not in TIMEFRAMES:
             return
-        await query.message.reply_text(
-            f"Market: {symbol} | Timeframe: {timeframe}\nTekan tombol untuk analisis:",
-            reply_markup=analysis_menu(symbol, timeframe)
+
+        processing = await query.message.reply_text(
+            f"⏳ Menganalisis {symbol} {timeframe} (100 candle tertutup)..."
         )
+        try:
+            result = await asyncio.to_thread(analyze_market, symbol, timeframe)
+            risk_profile = get_user_risk_profile(user.id)
+            report_text = create_report(result, risk_profile=risk_profile)
+
+            if role == "TRIAL":
+                await asyncio.to_thread(consume_trial_if_needed, user.id)
+                _, _, new_status = check_user_access(user.id)
+                report_text += f"\n\n🎁 {new_status}"
+
+            await processing.edit_text(report_text, reply_markup=analysis_menu(symbol, timeframe))
+        except Exception as err:
+            await processing.edit_text(f"❌ ANALISIS GAGAL:\n{str(err)[:2000]}")
         return
 
     if data.startswith("conf_"):
@@ -809,35 +828,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await processing.edit_text(report_text, reply_markup=confluence_menu(symbol))
         except Exception as err:
             await processing.edit_text(f"❌ Confluence gagal:\n{str(err)[:2000]}")
-        return
-
-    if data.startswith("analyze_"):
-        allowed, role, _ = check_user_access(user.id)
-        if not allowed:
-            text, markup = build_locked_message_and_markup(user)
-            await query.message.reply_html(text, reply_markup=markup)
-            return
-
-        _, symbol, timeframe = data.split("_")
-        if symbol not in MARKETS or timeframe not in TIMEFRAMES:
-            return
-
-        processing = await query.message.reply_text(
-            f"⏳ Menganalisis {symbol} {timeframe} (100 candle tertutup)..."
-        )
-        try:
-            result = await asyncio.to_thread(analyze_market, symbol, timeframe)
-            risk_profile = get_user_risk_profile(user.id)
-            report_text = create_report(result, risk_profile=risk_profile)
-
-            if role == "TRIAL":
-                await asyncio.to_thread(consume_trial_if_needed, user.id)
-                _, _, new_status = check_user_access(user.id)
-                report_text += f"\n\n🎁 {new_status}"
-
-            await processing.edit_text(report_text, reply_markup=analysis_menu(symbol, timeframe))
-        except Exception as err:
-            await processing.edit_text(f"❌ ANALISIS GAGAL:\n{str(err)[:2000]}")
         return
 
     if data in ("calendar", "calendar_refresh"):
