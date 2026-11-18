@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 # ============================================================
 # MASTER SMC SCALPING BOT
@@ -13,12 +12,14 @@
 # ============================================================
 
 import os
+import re
 import sys
+import html
 import logging
 import asyncio
 import requests
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from telegram import (
     Update,
@@ -55,6 +56,14 @@ TIMEFRAMES = {
 CANDLE_COUNT = 100
 FETCH_COUNT = 150
 REQUEST_TIMEOUT = 25
+
+WIB = timezone(timedelta(hours=7))
+
+BULAN_ID = {
+    1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr",
+    5: "Mei", 6: "Jun", 7: "Jul", 8: "Agu",
+    9: "Sep", 10: "Okt", 11: "Nov", 12: "Des"
+}
 
 # ============================================================
 # LOGGING
@@ -101,6 +110,123 @@ def api_get(endpoint, params=None):
 
 
 # ============================================================
+# TRANSLATION & TIME HELPERS
+# ============================================================
+
+def translate_texts_to_id(texts):
+    """
+    Menerjemahkan list teks Inggris ke Bahasa Indonesia sekaligus
+    menggunakan endpoint publik tanpa perlu library tambahan.
+    """
+    if not texts:
+        return []
+
+    clean_inputs = [
+        re.sub(r"\s+", " ", str(t or "")).strip()
+        for t in texts
+    ]
+
+    if not any(clean_inputs):
+        return clean_inputs
+
+    separator = "\n|||\n"
+    joined_text = separator.join(clean_inputs)
+
+    try:
+        resp = SESSION.get(
+            "https://translate.googleapis.com/translate_a/single",
+            params={
+                "client": "gtx",
+                "sl": "en",
+                "tl": "id",
+                "dt": "t",
+                "q": joined_text
+            },
+            timeout=8
+        )
+
+        if resp.status_code == 200:
+            data = resp.json()
+            translated_full = "".join(
+                part[0] for part in data[0] if part and part[0]
+            )
+            parts = [p.strip() for p in translated_full.split("|||")]
+
+            if len(parts) == len(clean_inputs):
+                return [
+                    parts[i] if parts[i] else clean_inputs[i]
+                    for i in range(len(clean_inputs))
+                ]
+
+    except Exception as err:
+        log.warning("Translasi dilewati (fallback ke teks asli): %s", err)
+
+    return clean_inputs
+
+
+def format_wib_time(value):
+    """
+    Mengonversi timestamp/ISO string ke format waktu WIB yang rapi.
+    """
+    if value is None or str(value).strip() == "":
+        return "Waktu belum tersedia"
+
+    raw_str = str(value).strip()
+
+    try:
+        if isinstance(value, (int, float)) or raw_str.replace(".", "", 1).isdigit():
+            num = float(raw_str)
+            if num > 100000000000:
+                num /= 1000.0
+            dt = datetime.fromtimestamp(num, tz=timezone.utc).astimezone(WIB)
+            bulan = BULAN_ID.get(dt.month, dt.strftime("%b"))
+            return f"{dt.day:02d} {bulan} {dt.year} | {dt.strftime('%H:%M')} WIB"
+
+        iso_str = raw_str[:-1] + "+00:00" if raw_str.endswith("Z") else raw_str
+        dt = datetime.fromisoformat(iso_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        dt_wib = dt.astimezone(WIB)
+        bulan = BULAN_ID.get(dt_wib.month, dt_wib.strftime("%b"))
+        return f"{dt_wib.day:02d} {bulan} {dt_wib.year} | {dt_wib.strftime('%H:%M')} WIB"
+
+    except Exception:
+        return raw_str
+
+
+def parse_numeric_metric(val):
+    """
+    Ekstrak nilai angka dari string seperti '3.4%', '250K', '-0.2%', '1.5M'.
+    """
+    if val is None:
+        return None
+
+    text = str(val).strip().upper().replace(",", "")
+    if not text or text in ("-", "N/A", "NONE", "NULL", "TBD"):
+        return None
+
+    multiplier = 1.0
+    if text.endswith("K"):
+        multiplier = 1_000.0
+        text = text[:-1]
+    elif text.endswith("M"):
+        multiplier = 1_000_000.0
+        text = text[:-1]
+    elif text.endswith("B"):
+        multiplier = 1_000_000_000.0
+        text = text[:-1]
+
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    if not match:
+        return None
+
+    try:
+        return float(match.group(0)) * multiplier
+    except ValueError:
+        return None
+
+
+# ============================================================
 # CANDLE DATA PARSER - BIQUOTE
 # ============================================================
 
@@ -130,8 +256,6 @@ def parse_candle_time(value):
     if value is None:
         raise ValueError("Waktu candle kosong")
 
-    # Format ISO 8601, misalnya:
-    # 2026-11-18T05:30:00Z
     if isinstance(value, str):
 
         value = value.strip()
@@ -150,10 +274,8 @@ def parse_candle_time(value):
         except ValueError:
             pass
 
-    # Format Unix timestamp
     number = float(value)
 
-    # Milidetik ke detik
     if number > 100000000000:
         number /= 1000
 
@@ -190,7 +312,6 @@ def normalize_candles(raw):
                 "is_open": item.get("isOpen", False)
             }
 
-            # Validasi OHLC
             if candle["high"] < candle["low"]:
                 continue
 
@@ -204,7 +325,6 @@ def normalize_candles(raw):
             ):
                 continue
 
-            # Buang candle yang masih terbuka
             is_open = candle["is_open"]
 
             if is_open is True:
@@ -223,11 +343,8 @@ def normalize_candles(raw):
             "Tidak ada candle valid setelah proses normalisasi"
         )
 
-    # API mengirim newest-first.
-    # Kita urutkan menjadi oldest-first.
     candles.sort(key=lambda candle: candle["time"])
 
-    # Hilangkan timestamp duplikat
     unique = {}
 
     for candle in candles:
@@ -238,7 +355,6 @@ def normalize_candles(raw):
         key=lambda candle: candle["time"]
     )
 
-    # Ambil tepat 100 candle tertutup paling baru
     candles = candles[-CANDLE_COUNT:]
 
     if len(candles) < CANDLE_COUNT:
@@ -301,7 +417,6 @@ def detect_fvg(candles):
         first = candles[i - 2]
         third = candles[i]
 
-        # Bullish FVG
         if third["low"] > first["high"]:
 
             return (
@@ -310,7 +425,6 @@ def detect_fvg(candles):
                 third["low"]
             )
 
-        # Bearish FVG
         if third["high"] < first["low"]:
 
             return (
@@ -400,7 +514,6 @@ def detect_snd(candles):
             current["close"] - current["open"]
         )
 
-        # Bullish displacement
         if (
             current["close"] > current["open"]
             and body >= candle_range * 0.65
@@ -408,7 +521,6 @@ def detect_snd(candles):
         ):
             demand = current["low"]
 
-        # Bearish displacement
         if (
             current["close"] < current["open"]
             and body >= candle_range * 0.65
@@ -623,7 +735,7 @@ def create_report(result):
 
 
 # ============================================================
-# CALENDAR & NEWS
+# CALENDAR & NEWS (US FOCUS + XAUUSD IMPACT + BAHASA INDONESIA)
 # ============================================================
 
 def get_calendar():
@@ -638,68 +750,382 @@ def get_news():
         params={
             "language": "en",
             "country": "US",
-            "maxResults": 10
+            "maxResults": 12
         }
     )
 
 
-def format_simple_data(data, title):
+def _extract_list_payload(data):
 
     if isinstance(data, dict):
-
-        for key in ("data", "events", "news", "result", "items"):
-
+        for key in ("data", "events", "news", "result", "items", "articles"):
             if isinstance(data.get(key), list):
-                data = data[key]
-                break
+                return data[key]
 
-    if not isinstance(data, list):
-        return f"{title}\n\nFormat data tidak dikenali."
+    if isinstance(data, list):
+        return data
 
-    if not data:
-        return f"{title}\n\nBelum ada data."
+    return None
 
-    lines = [
-        title,
-        "━━━━━━━━━━━━━━━━━━"
-    ]
 
-    for item in data[:10]:
+def _impact_rank_and_badge(raw_impact, title_en):
 
-        if isinstance(item, dict):
+    imp = str(raw_impact or "").strip().lower()
+    t = title_en.lower()
 
-            name = (
-                item.get("title")
-                or item.get("event")
-                or item.get("name")
-                or "Informasi"
-            )
+    high_keywords = (
+        "cpi", "non-farm", "nonfarm", "nfp", "fomc", "interest rate",
+        "fed ", "powell", "ppi", "pce", "gdp", "retail sales",
+        "unemployment", "jobless claims", "ism manufacturing", "ism services"
+    )
 
-            time = (
-                item.get("time")
-                or item.get("date")
-                or item.get("datetime")
-                or ""
-            )
+    if imp in ("high", "3", "red", "tinggi") or any(k in t for k in high_keywords):
+        return 3, "🔴 HIGH IMPACT"
 
-            impact = (
-                item.get("impact")
-                or item.get("importance")
-                or ""
-            )
+    if imp in ("medium", "moderate", "2", "orange", "yellow", "sedang"):
+        return 2, "🟡 MEDIUM IMPACT"
 
-            lines.append(f"\n• {name}")
+    return 1, "🟢 LOW IMPACT"
 
-            if time:
-                lines.append(f"Waktu: {time}")
 
-            if impact:
-                lines.append(f"Dampak: {impact}")
+def analyze_xau_event_impact(title_en, actual_raw, forecast_raw):
+    """
+    Menghasilkan analisa dampak spesifik data ekonomi US terhadap XAUUSD.
+    """
+    t = title_en.lower()
 
+    # Indikator yang sifatnya terbalik (angka naik = USD lemah = XAUUSD naik)
+    inverse_usd = any(
+        k in t for k in ("unemployment", "jobless claims", "layoff")
+    )
+
+    actual_num = parse_numeric_metric(actual_raw)
+    forecast_num = parse_numeric_metric(forecast_raw)
+
+    # Konteks pemicu emas
+    if any(k in t for k in ("cpi", "ppi", "pce", "inflation")):
+        driver = "Data inflasi US (penentu arah suku bunga The Fed)."
+    elif any(k in t for k in ("nfp", "non-farm", "nonfarm", "payroll", "employment", "jobless", "adp")):
+        driver = "Data tenaga kerja US (sensitif pada volatilitas XAUUSD)."
+    elif any(k in t for k in ("fomc", "interest rate", "powell", "fed")):
+        driver = "Kebijakan moneter The Fed & pergerakan Yield US10Y."
+    elif any(k in t for k in ("gdp", "retail sales", "pmi")):
+        driver = "Indikator kekuatan ekonomi & daya beli Amerika Serikat."
+    else:
+        driver = "Indikator makro USD (berkorelasi terbalik dengan Emas)."
+
+    # Jika hasil aktual sudah keluar dan bisa dibandingkan dengan prediksi
+    if actual_num is not None and forecast_num is not None:
+        if actual_num == forecast_num:
+            return f"{driver}\n⚖️ <b>Efek XAUUSD:</b> Sesuai prediksi (Netral / pantau reaksi teknikal)."
+
+        is_higher = actual_num > forecast_num
+
+        if inverse_usd:
+            if is_higher:
+                return f"{driver}\n🟢 <b>Efek XAUUSD:</b> Klaim/Pengangguran naik di atas prediksi ➔ USD melemah, <b>Potensi Bullish XAUUSD</b>."
+            return f"{driver}\n🔴 <b>Efek XAUUSD:</b> Klaim/Pengangguran turun di bawah prediksi ➔ USD menguat, <b>Potensi Bearish XAUUSD</b>."
         else:
-            lines.append(f"\n• {item}")
+            if is_higher:
+                return f"{driver}\n🔴 <b>Efek XAUUSD:</b> Data US lebih kuat dari prediksi ➔ USD & Yield naik, <b>Potensi Bearish XAUUSD</b>."
+            return f"{driver}\n🟢 <b>Efek XAUUSD:</b> Data US di bawah prediksi ➔ USD melemah, <b>Potensi Bullish XAUUSD</b>."
 
-    return "\n".join(lines)
+    # Jika data belum rilis (berikan skenario trading)
+    if inverse_usd:
+        return (
+            f"{driver}\n"
+            "💡 <b>Skenario XAU:</b> Aktual &gt; Prediksi ➔ <b>Bullish XAU 🟢</b> | "
+            "Aktual &lt; Prediksi ➔ <b>Bearish XAU 🔴</b>"
+        )
+
+    return (
+        f"{driver}\n"
+        "💡 <b>Skenario XAU:</b> Aktual &gt; Prediksi ➔ <b>Bearish XAU 🔴</b> | "
+        "Aktual &lt; Prediksi ➔ <b>Bullish XAU 🟢</b>"
+    )
+
+
+def format_calendar_data(data):
+
+    items = _extract_list_payload(data)
+
+    if items is None:
+        return "<b>📅 KALENDER EKONOMI US</b>\n\nFormat data tidak dikenali."
+
+    if not items:
+        return "<b>📅 KALENDER EKONOMI US</b>\n\nBelum ada jadwal rilis data."
+
+    # Filter khusus US / USD jika field negara/mata uang tersedia
+    us_items = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        country = str(
+            item.get("country")
+            or item.get("currency")
+            or item.get("ccy")
+            or item.get("code")
+            or ""
+        ).strip().upper()
+
+        if country in ("US", "USA", "USD", "UNITED STATES", "UNITED STATES OF AMERICA"):
+            us_items.append(item)
+
+    filtered = us_items if us_items else [i for i in items if isinstance(i, dict)]
+
+    if not filtered:
+        return "<b>📅 KALENDER EKONOMI US</b>\n\nTidak ada jadwal ekonomi US ditemukan."
+
+    # Urutkan berdasarkan tingkat dampak tertinggi (High Impact di atas)
+    enriched = []
+    for item in filtered:
+        title_en = str(
+            item.get("title")
+            or item.get("event")
+            or item.get("name")
+            or item.get("indicator")
+            or "Rilis Ekonomi US"
+        ).strip()
+
+        raw_impact = (
+            item.get("impact")
+            or item.get("importance")
+            or item.get("volatility")
+            or ""
+        )
+
+        rank, badge = _impact_rank_and_badge(raw_impact, title_en)
+        enriched.append((rank, badge, title_en, item))
+
+    enriched.sort(key=lambda x: x[0], reverse=True)
+    top_events = enriched[:8]
+
+    # Terjemahkan semua judul event ke Bahasa Indonesia sekaligus
+    titles_en = [entry[2] for entry in top_events]
+    titles_id = translate_texts_to_id(titles_en)
+
+    header = (
+        "<b>📅 KALENDER EKONOMI US (FOKUS XAUUSD)</b>\n"
+        "<i>Waktu dikonversi ke WIB • Prioritas Dampak Tinggi</i>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+    )
+
+    footer = (
+        "\n━━━━━━━━━━━━━━━━━━━━\n"
+        "<i>⚠️ Waspada pelebaran spread XAUUSD 15 menit sebelum &amp; sesudah rilis High Impact.</i>"
+    )
+
+    body_blocks = []
+    current_len = len(header) + len(footer)
+
+    for idx, (rank, badge, title_en, item) in enumerate(top_events):
+        title_id = titles_id[idx]
+
+        # Tampilkan nama terjemahan + istilah asli jika berbeda agar trader tetap kenal istilahnya
+        if title_id.lower() != title_en.lower():
+            display_title = f"{html.escape(title_id)} <i>({html.escape(title_en)})</i>"
+        else:
+            display_title = html.escape(title_en)
+
+        raw_time = (
+            item.get("time")
+            or item.get("date")
+            or item.get("datetime")
+            or item.get("releaseTime")
+        )
+        time_wib = html.escape(format_wib_time(raw_time))
+
+        actual = item.get("actual")
+        forecast = (
+            item.get("forecast")
+            or item.get("consensus")
+            or item.get("estimate")
+        )
+        previous = (
+            item.get("previous")
+            or item.get("prior")
+        )
+
+        act_str = html.escape(str(actual)) if actual not in (None, "") else "⏳ Belum rilis"
+        fc_str = html.escape(str(forecast)) if forecast not in (None, "") else "-"
+        prev_str = html.escape(str(previous)) if previous not in (None, "") else "-"
+
+        xau_note = analyze_xau_event_impact(title_en, actual, forecast)
+
+        block = (
+            f"\n<b>{idx + 1}. {display_title}</b>\n"
+            f"🇺🇸 USD | {badge}\n"
+            f"🕒 <code>{time_wib}</code>\n"
+            f"📊 Aktual: <b>{act_str}</b> | Prediksi: <b>{fc_str}</b> | Sblm: <b>{prev_str}</b>\n"
+            f"<blockquote>{xau_note}</blockquote>\n"
+        )
+
+        if current_len + len(block) > 3850:
+            break
+
+        body_blocks.append(block)
+        current_len += len(block)
+
+    return header + "".join(body_blocks) + footer
+
+
+def analyze_xau_news_sentiment(text_en):
+    """
+    Mendeteksi relevansi dan arah sentimen berita terhadap XAUUSD.
+    """
+    t = text_en.lower()
+
+    xau_keywords = (
+        "gold", "xau", "bullion", "precious metal", "fed", "powell",
+        "fomc", "inflation", "cpi", "ppi", "pce", "treasury", "yield",
+        "dollar", "usd", "payroll", "nfp", "jobs", "unemployment",
+        "rate cut", "rate hike", "interest rate", "safe haven",
+        "geopolit", "war", "conflict", "tariff", "recession"
+    )
+
+    is_xau_related = any(k in t for k in xau_keywords)
+
+    bullish_xau_signals = (
+        "gold rises", "gold surges", "gold climbs", "gold gains", "gold hits",
+        "rate cut", "dovish", "inflation cools", "inflation slows",
+        "dollar falls", "dollar weakens", "dollar slips", "yields fall",
+        "yields drop", "safe haven", "geopolitical", "tension", "war",
+        "recession fears", "weak jobs", "unemployment rises"
+    )
+
+    bearish_xau_signals = (
+        "gold falls", "gold drops", "gold slips", "gold retreats", "gold declines",
+        "rate hike", "hawkish", "hot inflation", "inflation rises",
+        "dollar surges", "dollar rallies", "dollar strengthens", "yields rise",
+        "yields surge", "strong jobs", "payrolls beat", "higher for longer"
+    )
+
+    if any(k in t for k in bullish_xau_signals):
+        sentiment = "🟢 <b>Sentimen XAUUSD:</b> Potensi Bullish (Dukungan Safe Haven / USD Melemah)"
+    elif any(k in t for k in bearish_xau_signals):
+        sentiment = "🔴 <b>Sentimen XAUUSD:</b> Potensi Bearish (Tekanan Penguatan USD &amp; Yield)"
+    elif is_xau_related:
+        sentiment = "🟡 <b>Sentimen XAUUSD:</b> Katalis Makro Penting (Pantau Volatilitas USD)"
+    else:
+        sentiment = "⚪ <b>Sentimen XAUUSD:</b> Info Pasar Umum US (Dampak Tidak Langsung)"
+
+    return is_xau_related, sentiment
+
+
+def format_news_data(data):
+
+    items = _extract_list_payload(data)
+
+    if items is None:
+        return "<b>📰 BERITA MARKET US &amp; XAUUSD</b>\n\nFormat data tidak dikenali."
+
+    if not items:
+        return "<b>📰 BERITA MARKET US &amp; XAUUSD</b>\n\nBelum ada berita terbaru."
+
+    # Prioritaskan berita yang relevan dengan XAUUSD / Makro US
+    scored_news = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        title_en = str(
+            item.get("title")
+            or item.get("headline")
+            or item.get("name")
+            or ""
+        ).strip()
+
+        if not title_en:
+            continue
+
+        summary_en = str(
+            item.get("summary")
+            or item.get("description")
+            or item.get("snippet")
+            or item.get("text")
+            or ""
+        ).strip()
+
+        # Bersihkan tag HTML jika API mengirim snippet ber-HTML
+        summary_en = re.sub(r"<[^>]+>", "", summary_en)
+        summary_en = re.sub(r"\s+", " ", summary_en).strip()
+
+        if len(summary_en) > 170:
+            summary_en = summary_en[:167].rsplit(" ", 1)[0] + "..."
+
+        combined_en = f"{title_en} {summary_en}"
+        is_xau, sentiment = analyze_xau_news_sentiment(combined_en)
+
+        scored_news.append((1 if is_xau else 0, is_xau, sentiment, title_en, summary_en, item))
+
+    scored_news.sort(key=lambda x: x[0], reverse=True)
+    top_news = scored_news[:6]
+
+    if not top_news:
+        return "<b>📰 BERITA MARKET US &amp; XAUUSD</b>\n\nBelum ada berita valid."
+
+    # Terjemahkan judul & ringkasan ke Bahasa Indonesia dalam satu kali panggilan
+    texts_to_translate = []
+    for _, _, _, title_en, summary_en, _ in top_news:
+        texts_to_translate.append(title_en)
+        texts_to_translate.append(summary_en if summary_en else "Tidak ada ringkasan tambahan.")
+
+    translated_all = translate_texts_to_id(texts_to_translate)
+
+    header = (
+        "<b>📰 BERITA MARKET US &amp; DAMPAK XAUUSD</b>\n"
+        "<i>Diterjemahkan otomatis ke Bahasa Indonesia</i>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+    )
+
+    footer = (
+        "\n━━━━━━━━━━━━━━━━━━━━\n"
+        "<i>💡 Berita bertanda <b>FOKUS XAUUSD</b> berdampak langsung pada pergerakan Emas &amp; Dolar AS.</i>"
+    )
+
+    body_blocks = []
+    current_len = len(header) + len(footer)
+
+    for idx, (_, is_xau, sentiment, title_en, summary_en, item) in enumerate(top_news):
+        title_id = html.escape(translated_all[idx * 2] or title_en)
+        summary_id = html.escape(translated_all[idx * 2 + 1]) if summary_en else ""
+
+        source = html.escape(
+            str(
+                item.get("source")
+                or item.get("publisher")
+                or item.get("site")
+                or "Market Wire"
+            ).strip()
+        )
+
+        raw_time = (
+            item.get("publishedAt")
+            or item.get("published_at")
+            or item.get("time")
+            or item.get("date")
+            or item.get("datetime")
+        )
+        time_wib = html.escape(format_wib_time(raw_time))
+
+        tag = "🥇 <b>FOKUS XAUUSD</b>" if is_xau else "🇺🇸 <b>MARKET US</b>"
+
+        summary_line = f"{summary_id}\n" if summary_id else ""
+
+        block = (
+            f"\n{tag} • <i>{source}</i>\n"
+            f"<b>{idx + 1}. {title_id}</b>\n"
+            f"🕒 <code>{time_wib}</code>\n"
+            f"<blockquote>{summary_line}{sentiment}</blockquote>\n"
+        )
+
+        if current_len + len(block) > 3850:
+            break
+
+        body_blocks.append(block)
+        current_len += len(block)
+
+    return header + "".join(body_blocks) + footer
 
 
 # ============================================================
@@ -721,7 +1147,7 @@ def main_menu():
         ],
         [
             InlineKeyboardButton(
-                "📅 Kalender Ekonomi",
+                "📅 Kalender Ekonomi US",
                 callback_data="calendar"
             ),
             InlineKeyboardButton(
@@ -781,6 +1207,24 @@ def analysis_menu(symbol, timeframe):
             )
         ],
         [
+            InlineKeyboardButton(
+                "🏠 Menu Utama",
+                callback_data="menu"
+            )
+        ]
+    ]
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+def info_menu(refresh_action):
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "🔄 Refresh Data",
+                callback_data=refresh_action
+            ),
             InlineKeyboardButton(
                 "🏠 Menu Utama",
                 callback_data="menu"
@@ -903,8 +1347,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
             await processing.edit_text(
-             create_report(result),
-    reply_markup=analysis_menu(symbol, timeframe)
+                create_report(result),
+                reply_markup=analysis_menu(symbol, timeframe)
             )
 
             log.info(
@@ -929,18 +1373,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "calendar":
 
         message = await query.message.reply_text(
-            "⏳ Mengambil kalender ekonomi..."
+            "⏳ Mengambil & menerjemahkan kalender ekonomi US..."
         )
 
         try:
 
-            result = await asyncio.to_thread(get_calendar)
+            raw_result = await asyncio.to_thread(get_calendar)
+            formatted_text = await asyncio.to_thread(
+                format_calendar_data,
+                raw_result
+            )
 
             await message.edit_text(
-                format_simple_data(
-                    result,
-                    "📅 KALENDER EKONOMI"
-                )[:4000]
+                formatted_text,
+                parse_mode="HTML",
+                reply_markup=info_menu("calendar")
             )
 
         except Exception as error:
@@ -948,7 +1395,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log.exception("CALENDAR ERROR")
 
             await message.edit_text(
-                f"❌ Kalender gagal:\n{str(error)[:2000]}"
+                f"❌ Kalender gagal:\n{str(error)[:2000]}",
+                reply_markup=info_menu("calendar")
             )
 
         return
@@ -956,18 +1404,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "news":
 
         message = await query.message.reply_text(
-            "⏳ Mengambil berita market..."
+            "⏳ Mengambil & menerjemahkan berita market US..."
         )
 
         try:
 
-            result = await asyncio.to_thread(get_news)
+            raw_result = await asyncio.to_thread(get_news)
+            formatted_text = await asyncio.to_thread(
+                format_news_data,
+                raw_result
+            )
 
             await message.edit_text(
-                format_simple_data(
-                    result,
-                    "📰 BERITA MARKET"
-                )[:4000]
+                formatted_text,
+                parse_mode="HTML",
+                reply_markup=info_menu("news")
             )
 
         except Exception as error:
@@ -975,7 +1426,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log.exception("NEWS ERROR")
 
             await message.edit_text(
-                f"❌ Berita gagal:\n{str(error)[:2000]}"
+                f"❌ Berita gagal:\n{str(error)[:2000]}",
+                reply_markup=info_menu("news")
             )
 
         return
