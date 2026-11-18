@@ -71,10 +71,10 @@ def main_menu():
             InlineKeyboardButton("₿ BTCUSD", callback_data="market_BTCUSD")
         ],
         [
-            InlineKeyboardButton("⚡ Confluence XAU (H4+H1+M15+M5)", callback_data="conf_XAUUSD")
+            InlineKeyboardButton("⚡ Confluence XAU (H4..M1)", callback_data="conf_XAUUSD")
         ],
         [
-            InlineKeyboardButton("⚡ Confluence BTC (H4+H1+M15+M5)", callback_data="conf_BTCUSD")
+            InlineKeyboardButton("⚡ Confluence BTC (H4..M1)", callback_data="conf_BTCUSD")
         ],
         [
             InlineKeyboardButton("🔔 Sinyal & Peringatan Otomatis", callback_data="sig_menu")
@@ -103,7 +103,7 @@ def timeframe_menu(symbol):
         keyboard.append(row)
 
     keyboard.append([
-        InlineKeyboardButton(f"⚡ Confluence Pro {symbol} (4 TF)", callback_data=f"conf_{symbol}")
+        InlineKeyboardButton(f"⚡ Confluence Pro {symbol} (6 TF: H4..M1)", callback_data=f"conf_{symbol}")
     ])
     keyboard.append([
         InlineKeyboardButton("⬅️ Menu Utama", callback_data="menu")
@@ -114,7 +114,7 @@ def timeframe_menu(symbol):
 def analysis_menu(symbol, timeframe):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔍 ANALISA SEKARANG", callback_data=f"analyze_{symbol}_{timeframe}")],
-        [InlineKeyboardButton(f"⚡ Confluence Pro {symbol} (4 TF)", callback_data=f"conf_{symbol}")],
+        [InlineKeyboardButton(f"⚡ Confluence Pro {symbol} (6 TF)", callback_data=f"conf_{symbol}")],
         [
             InlineKeyboardButton("⬅️ Ganti TF", callback_data=f"market_{symbol}"),
             InlineKeyboardButton("🏠 Menu Utama", callback_data="menu")
@@ -124,7 +124,7 @@ def analysis_menu(symbol, timeframe):
 
 def confluence_menu(symbol):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 Refresh Confluence (4 TF)", callback_data=f"conf_{symbol}")],
+        [InlineKeyboardButton("🔄 Refresh Confluence (6 TF)", callback_data=f"conf_{symbol}")],
         [
             InlineKeyboardButton(f"📊 Pilih TF {symbol}", callback_data=f"market_{symbol}"),
             InlineKeyboardButton("🏠 Menu Utama", callback_data="menu")
@@ -162,8 +162,11 @@ def build_signal_settings_text(user_id):
         f"Status Sinyal 3-TF Kamu: <b>{status_label}</b>\n\n"
         "<b>1️⃣ Sinyal Otomatis 3-TF (H1 + M15 + M5):</b>\n"
         "Bot memindai pasar tiap <b>10 menit</b> dan mengirim sinyal otomatis apabila <b>H1, M15, dan M5 kompak searah</b> dengan minimal 4/7 konfirmasi SMC.\n\n"
-        "<b>2️⃣ Peringatan Otomatis Buka Sesi &amp; News Besar:</b>\n"
-        "• Otomatis memberi peringatan <b>15 menit sebelum</b> buka sesi London (14:00 WIB) &amp; New York (19:30 WIB).\n"
+        "<b>2️⃣ Peringatan Otomatis Buka Sesi (Winter Time WIB) &amp; News Besar:</b>\n"
+        "• Otomatis memberi peringatan <b>15 menit sebelum</b> pembukaan sesi:\n"
+        "  - <b>Asia Utama Open:</b> 09:00 WIB (Notif pukul 08:45 WIB)\n"
+        "  - <b>London Open:</b> 15:00 WIB (Notif pukul 14:45 WIB)\n"
+        "  - <b>New York / US Open:</b> 20:30 WIB (Notif pukul 20:15 WIB)\n"
         "• Otomatis memberi peringatan <b>30 &amp; 15 menit sebelum</b> rilis berita US berdampak besar (<b>CPI, PPI, NFP, FOMC, PCE, GDP</b>) agar kamu sempat mengamankan posisi atau menghapus <i>Pending Limit</i>.\n\n"
         "<i>Pilih market untuk Sinyal Otomatis 3-TF di bawah ini:</i>"
     )
@@ -238,8 +241,8 @@ def build_help_text(user_id):
         "• <code>/panduan</code> — Membuka halaman panduan ini.\n\n"
         "<b>2️⃣ ZONA JEMPUTAN &amp; CONFLUENCE PRO:</b>\n"
         "• <b>Zona Jemputan (Pending Limit):</b> Setiap analisa menampilkan zona <b>SELL LIMIT</b> (di atas harga) dan <b>BUY LIMIT</b> (di bawah harga) beserta status keamanannya.\n"
-        "• <b>Confluence Pro (4 TF):</b> Menggabungkan analisa <b>H4 + H1 + M15 + M5</b> sekaligus.\n"
-        "• <b>Sinyal &amp; Peringatan Otomatis:</b> Notifikasi otomatis saat H1+M15+M5 searah, serta peringatan otomatis menjelang buka sesi London/NY &amp; rilis news CPI/PPI/NFP/FOMC.\n\n"
+        "• <b>Confluence Pro (6 TF):</b> Menggabungkan analisa <b>H4 + H1 + M30 + M15 + M5 + M1</b> sekaligus.\n"
+        "• <b>Sinyal &amp; Peringatan Otomatis:</b> Notifikasi otomatis saat H1+M15+M5 searah, serta peringatan otomatis menjelang buka sesi Asia (09:00), London (15:00), NY (20:30 WIB) &amp; rilis news CPI/PPI/NFP/FOMC.\n\n"
         "<b>3️⃣ KALKULATOR LOT OTOMATIS:</b>\n"
         "• <code>/setrisk 500 1</code>\n"
         "  <i>Mengatur modal $500 dengan risiko 1% per entry.</i>\n\n"
@@ -293,9 +296,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"🆔 ID Kamu: <code>{user.id}</code>\n"
         f"📌 Status: <b>{html.escape(status_info)}</b>\n\n"
-        "• <b>7 Metode Murni SMC + Zona Jemputan (Sell/Buy Limit)</b>\n"
-        "• <b>Multi-TF Confluence:</b> H4 + H1 + M15 + M5\n"
-        "• <b>Peringatan Otomatis:</b> Buka Sesi London/NY &amp; News CPI/PPI/NFP/FOMC"
+        "• <b>7 Metode Murni SMC + Sinyal Pending Limit (Sell/Buy Limit)</b>\n"
+        "• <b>Multi-TF Confluence (6 TF):</b> H4 + H1 + M30 + M15 + M5 + M1\n"
+        "• <b>Peringatan Otomatis:</b> Buka Sesi Asia/London/NY &amp; News CPI/PPI/NFP/FOMC"
         f"{admin_hint}",
         reply_markup=main_menu()
     )
@@ -765,7 +768,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if symbol not in MARKETS:
             return
         await query.message.reply_text(
-            f"Market: {symbol}\nPilih timeframe atau jalankan Confluence Pro (4 TF):",
+            f"Market: {symbol}\nPilih timeframe atau jalankan Confluence Pro (6 TF: H4..M1):",
             reply_markup=timeframe_menu(symbol)
         )
         return
@@ -792,7 +795,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         processing = await query.message.reply_text(
-            f"⚡ Menjalankan Confluence Pro {symbol} (H4 + H1 + M15 + M5)..."
+            f"⚡ Menjalankan Confluence Pro {symbol} (6 TF: H4 + H1 + M30 + M15 + M5 + M1)..."
         )
         try:
             risk_profile = get_user_risk_profile(user.id)
@@ -877,10 +880,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def check_and_send_session_warnings(application):
     """
     Otomatis mengirim peringatan tanpa diperintah 15 menit menjelang
-    pembukaan sesi London (13:45 WIB) dan New York / US (19:15 WIB).
+    pembukaan sesi utama (Winter Time WIB):
+      - 08:45 WIB -> 15 menit menuju Asia Utama Open (09:00 WIB)
+      - 14:45 WIB -> 15 menit menuju London Open (15:00 WIB)
+      - 20:15 WIB -> 15 menit menuju New York / US Open (20:30 WIB)
     """
     now_wib = datetime.now(WIB)
-    # Lewati Sabtu & Minggu untuk pembukaan sesi forex/emas
     if now_wib.weekday() >= 5:
         return
 
@@ -890,28 +895,42 @@ async def check_and_send_session_warnings(application):
 
     session_alert = None
 
-    # 13:45 - 13:49 WIB -> 15 menit menuju London Open (14:00 WIB)
-    if hour == 13 and 45 <= minute <= 49:
+    # 08:45 - 08:49 WIB -> 15 menit menuju Asia Utama Open (09:00 WIB)
+    if hour == 8 and 45 <= minute <= 49:
+        key = f"{date_tag}_ASIA_OPEN"
+        if key not in SENT_SESSION_WARNINGS:
+            SENT_SESSION_WARNINGS.add(key)
+            session_alert = (
+                "🌏 <b>PERINGATAN PEMBUKAAN SESI ASIA UTAMA (09:00 WIB)</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "⏳ <b>15 Menit Lagi</b> likuiditas penuh Asia (HK/SG/Shanghai) masuk.\n\n"
+                "📌 <b>Karakteristik Sesi Asia (XAUUSD &amp; BTCUSD):</b>\n"
+                "• Volume pagi mulai terbentuk dan harga cenderung bergerak rapi di dalam <i>range</i> (pantulan OB &amp; SNR).\n"
+                "• Cocok untuk <b>Pending Limit (Buy/Sell Limit)</b> dengan target TP konservatif sebelum sesi Eropa buka."
+            )
+
+    # 14:45 - 14:49 WIB -> 15 menit menuju London Open (15:00 WIB)
+    elif hour == 14 and 45 <= minute <= 49:
         key = f"{date_tag}_LONDON_OPEN"
         if key not in SENT_SESSION_WARNINGS:
             SENT_SESSION_WARNINGS.add(key)
             session_alert = (
-                "⚠️ <b>PERINGATAN PEMBUKAAN SESI LONDON (14:00 WIB)</b>\n"
+                "⚠️ <b>PERINGATAN PEMBUKAAN SESI LONDON (15:00 WIB)</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
                 "⏳ <b>15 Menit Lagi</b> sesi Eropa/London dibuka.\n\n"
                 "📌 <b>Saran Pengamanan (XAUUSD &amp; BTCUSD):</b>\n"
                 "• Volume transaksi institusi mulai melonjak dan sering terjadi sapuan ekor (<i>Liquidity Sweep</i>).\n"
                 "• Pertimbangkan <b>hapus sementara Pending Limit</b> yang terlalu dekat dengan harga berjalan.\n"
-                "• Tunggu konfirmasi rejection candle M5/M15 sebelum masuk posisi baru."
+                "• Tunggu konfirmasi rejection candle M1/M5 sebelum masuk posisi baru."
             )
 
-    # 19:15 - 19:19 WIB -> 15 menit menuju New York / US Open (19:30 WIB)
-    elif hour == 19 and 15 <= minute <= 19:
+    # 20:15 - 20:19 WIB -> 15 menit menuju New York / US Open (20:30 WIB)
+    elif hour == 20 and 15 <= minute <= 19:
         key = f"{date_tag}_NY_OPEN"
         if key not in SENT_SESSION_WARNINGS:
             SENT_SESSION_WARNINGS.add(key)
             session_alert = (
-                "🚨 <b>PERINGATAN PEMBUKAAN SESI NEW YORK / US (19:30 WIB)</b>\n"
+                "🚨 <b>PERINGATAN PEMBUKAAN SESI NEW YORK / US (20:30 WIB)</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
                 "⏳ <b>15 Menit Lagi</b> sesi Amerika dibuka (Prime Killzone).\n\n"
                 "📌 <b>Saran Pengamanan (XAUUSD &amp; BTCUSD):</b>\n"
@@ -956,7 +975,6 @@ async def check_and_send_news_warnings(application):
 
     for ev in events:
         mins = ev["minutes_left"]
-        # Kirim di 2 titik waktu: tahap 30 menit sebelum (26..35 mnt) dan 15 menit sebelum (10..18 mnt)
         if 26 <= mins <= 35:
             stage = "30M"
         elif 10 <= mins <= 18:
@@ -1040,11 +1058,11 @@ async def background_scanner_and_alerts(application):
                                     f"━━━━━━━━━━━━━━━━━━━━\n"
                                     f"• Target Alert: <b>{format_price(target)}</b>\n"
                                     f"• Harga Saat Ini: <b>{format_price(cur)}</b>\n\n"
-                                    f"Tekan tombol di bawah untuk langsung analisa 4 TF:"
+                                    f"Tekan tombol di bawah untuk langsung analisa 6 TF:"
                                 ),
                                 parse_mode="HTML",
                                 reply_markup=InlineKeyboardMarkup([
-                                    [InlineKeyboardButton(f"⚡ Confluence Pro {sym} (4 TF)", callback_data=f"conf_{sym}")]
+                                    [InlineKeyboardButton(f"⚡ Confluence Pro {sym} (6 TF)", callback_data=f"conf_{sym}")]
                                 ])
                             )
                         except Exception:
@@ -1077,7 +1095,7 @@ async def background_scanner_and_alerts(application):
                                             chat_id=uid,
                                             text=msg_text,
                                             reply_markup=InlineKeyboardMarkup([
-                                                [InlineKeyboardButton(f"⚡ Cek Confluence 4-TF {sym}", callback_data=f"conf_{sym}")],
+                                                [InlineKeyboardButton(f"⚡ Cek Confluence 6-TF {sym}", callback_data=f"conf_{sym}")],
                                                 [InlineKeyboardButton("🔔 Atur Notifikasi Sinyal", callback_data="sig_menu")]
                                             ])
                                         )
@@ -1105,7 +1123,7 @@ async def post_init(application):
     log.info("======================================")
     log.info("MASTER SMC SCALPING BOT PRO STARTED")
     log.info("Free Mode: %s | Admin IDs: %s", is_free_mode(), USERS_DB["admin_ids"])
-    log.info("Proactive Alerts: London Open, NY Open, US High-Impact News, 3-TF Scanner")
+    log.info("Winter Time Alerts: Asia 09:00, London 15:00, NY 20:30 WIB")
     log.info("======================================")
     asyncio.create_task(background_scanner_and_alerts(application))
 
