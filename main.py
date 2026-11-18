@@ -20,6 +20,7 @@ from smc_engine import (
     analyze_market, create_report, analyze_confluence_pro,
     get_latest_price, check_triple_tf_signal, format_auto_signal_alert
 )
+from chart_generator import generate_smc_chart
 from fundamental_ai import (
     get_cached_calendar, get_cached_news, get_upcoming_high_impact_us_events
 )
@@ -37,10 +38,6 @@ SENT_NEWS_WARNINGS = set()
 
 
 def get_all_warning_recipients():
-    """
-    Mengumpulkan semua penerima peringatan otomatis (Admin, Member VIP aktif,
-    dan user yang sudah mengaktifkan langganan sinyal).
-    """
     today = today_wib_date()
     recipients = set(USERS_DB["admin_ids"])
 
@@ -240,8 +237,8 @@ def build_help_text(user_id):
         "• <code>/status</code> — Cek status akses, langganan sinyal &amp; profil risiko.\n"
         "• <code>/panduan</code> — Membuka halaman panduan ini.\n\n"
         "<b>2️⃣ ZONA JEMPUTAN &amp; CONFLUENCE PRO:</b>\n"
-        "• <b>Zona Jemputan (Pending Limit):</b> Setiap analisa menampilkan zona <b>SELL LIMIT</b> (di atas harga) dan <b>BUY LIMIT</b> (di bawah harga) beserta status keamanannya.\n"
-        "• <b>Confluence Pro (6 TF):</b> Menggabungkan analisa <b>H4 + H1 + M30 + M15 + M5 + M1</b> sekaligus.\n"
+        "• <b>Chart Struktur Otomatis:</b> Setiap analisa menampilkan gambar candle real-time beserta kotak OB/FVG/RBR-DBD &amp; garis SL/TP.\n"
+        "• <b>Confluence Pro (6 TF):</b> Menggabungkan analisa <b>H4 + H1 + M30 + M15 + M5 + M1</b> berdasarkan suara terbanyak.\n"
         "• <b>Sinyal &amp; Peringatan Otomatis:</b> Notifikasi otomatis saat H1+M15+M5 searah, serta peringatan otomatis menjelang buka sesi Asia (09:00), London (15:00), NY (20:30 WIB) &amp; rilis news CPI/PPI/NFP/FOMC.\n\n"
         "<b>3️⃣ KALKULATOR LOT OTOMATIS:</b>\n"
         "• <code>/setrisk 500 1</code>\n"
@@ -296,7 +293,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"🆔 ID Kamu: <code>{user.id}</code>\n"
         f"📌 Status: <b>{html.escape(status_info)}</b>\n\n"
-        "• <b>7 Metode Murni SMC + Sinyal Pending Limit (Sell/Buy Limit)</b>\n"
+        "• <b>7 Metode Murni SMC + Chart Struktur Real-Time</b>\n"
         "• <b>Multi-TF Confluence (6 TF):</b> H4 + H1 + M30 + M15 + M5 + M1\n"
         "• <b>Peringatan Otomatis:</b> Buka Sesi Asia/London/NY &amp; News CPI/PPI/NFP/FOMC"
         f"{admin_hint}",
@@ -768,7 +765,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if symbol not in MARKETS:
             return
         await query.message.reply_text(
-            f"Market: {symbol}\nPilih timeframe (langsung analisa) atau Confluence Pro (6 TF):",
+            f"Market: {symbol}\nPilih timeframe (langsung analisa + chart) atau Confluence Pro (6 TF):",
             reply_markup=timeframe_menu(symbol)
         )
         return
@@ -785,7 +782,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         processing = await query.message.reply_text(
-            f"⏳ Menganalisis {symbol} {timeframe} (100 candle tertutup)..."
+            f"⏳ Menganalisis {symbol} {timeframe} & menggambar chart struktur..."
         )
         try:
             result = await asyncio.to_thread(analyze_market, symbol, timeframe)
@@ -797,7 +794,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 _, _, new_status = check_user_access(user.id)
                 report_text += f"\n\n🎁 {new_status}"
 
-            await processing.edit_text(report_text, reply_markup=analysis_menu(symbol, timeframe))
+            try:
+                chart_buf = await asyncio.to_thread(generate_smc_chart, result["candles"], result)
+                await processing.delete()
+                await query.message.reply_photo(
+                    photo=chart_buf,
+                    caption=f"📊 Chart Struktur SMC Real-Time — {symbol} ({timeframe})"
+                )
+                await query.message.reply_text(report_text, reply_markup=analysis_menu(symbol, timeframe))
+            except Exception as chart_err:
+                log.warning("Chart render error: %s", chart_err)
+                await processing.edit_text(report_text, reply_markup=analysis_menu(symbol, timeframe))
         except Exception as err:
             await processing.edit_text(f"❌ ANALISIS GAGAL:\n{str(err)[:2000]}")
         return
@@ -868,13 +875,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 async def check_and_send_session_warnings(application):
-    """
-    Otomatis mengirim peringatan tanpa diperintah 15 menit menjelang
-    pembukaan sesi utama (Winter Time WIB):
-      - 08:45 WIB -> 15 menit menuju Asia Utama Open (09:00 WIB)
-      - 14:45 WIB -> 15 menit menuju London Open (15:00 WIB)
-      - 20:15 WIB -> 15 menit menuju New York / US Open (20:30 WIB)
-    """
     now_wib = datetime.now(WIB)
     if now_wib.weekday() >= 5:
         return
@@ -885,7 +885,6 @@ async def check_and_send_session_warnings(application):
 
     session_alert = None
 
-    # 08:45 - 08:49 WIB -> 15 menit menuju Asia Utama Open (09:00 WIB)
     if hour == 8 and 45 <= minute <= 49:
         key = f"{date_tag}_ASIA_OPEN"
         if key not in SENT_SESSION_WARNINGS:
@@ -899,7 +898,6 @@ async def check_and_send_session_warnings(application):
                 "• Cocok untuk <b>Pending Limit (Buy/Sell Limit)</b> dengan target TP konservatif sebelum sesi Eropa buka."
             )
 
-    # 14:45 - 14:49 WIB -> 15 menit menuju London Open (15:00 WIB)
     elif hour == 14 and 45 <= minute <= 49:
         key = f"{date_tag}_LONDON_OPEN"
         if key not in SENT_SESSION_WARNINGS:
@@ -914,7 +912,6 @@ async def check_and_send_session_warnings(application):
                 "• Tunggu konfirmasi rejection candle M1/M5 sebelum masuk posisi baru."
             )
 
-    # 20:15 - 20:19 WIB -> 15 menit menuju New York / US Open (20:30 WIB)
     elif hour == 20 and 15 <= minute <= 19:
         key = f"{date_tag}_NY_OPEN"
         if key not in SENT_SESSION_WARNINGS:
@@ -946,10 +943,6 @@ async def check_and_send_session_warnings(application):
 
 
 async def check_and_send_news_warnings(application):
-    """
-    Otomatis mengirim peringatan tanpa diperintah 30 menit dan 15 menit
-    sebelum rilis berita US High Impact (CPI, PPI, NFP, FOMC, PCE, GDP, Fed).
-    """
     try:
         events = await asyncio.to_thread(get_upcoming_high_impact_us_events, 35)
     except Exception as err:
@@ -1010,14 +1003,11 @@ async def background_scanner_and_alerts(application):
 
     while True:
         try:
-            # 1. Peringatan Otomatis Jam Buka Sesi (Setiap 1 menit dicek)
             await check_and_send_session_warnings(application)
 
-            # 2. Peringatan Otomatis News High Impact CPI/PPI/NFP/FOMC (Setiap 3 menit dicek)
             if tick % 3 == 0:
                 await check_and_send_news_warnings(application)
 
-            # 3. Cek Price Alert Pribadi setiap 1 menit
             if USERS_DB["price_alerts"]:
                 latest_prices = {}
                 for sym in MARKETS:
@@ -1064,7 +1054,6 @@ async def background_scanner_and_alerts(application):
                     ]
                     await asyncio.to_thread(sync_users)
 
-            # 4. Auto-Scanner 3-TF (H1 + M15 + M5) setiap 10 menit
             if tick % 10 == 0:
                 for sym in MARKETS:
                     recipients = get_signal_subscribers_for(sym)
@@ -1132,7 +1121,6 @@ def main():
         .build()
     )
 
-    # User & Trading Commands
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("menu", menu_command))
     application.add_handler(CommandHandler("panduan", panduan_command))
@@ -1143,7 +1131,6 @@ def main():
     application.add_handler(CommandHandler("myalert", cmd_my_alerts))
     application.add_handler(CommandHandler("delalert", cmd_del_alerts))
 
-    # Admin Commands
     application.add_handler(CommandHandler("claimadmin", claim_admin))
     application.add_handler(CommandHandler("admin", admin_panel))
     application.add_handler(CommandHandler("add", cmd_add_user))
