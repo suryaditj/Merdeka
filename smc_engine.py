@@ -1,12 +1,18 @@
 # -*- coding: utf-8 -*-
-from datetime import datetime
+import math
+from datetime import datetime, timezone
 from config import (
     MARKETS, TIMEFRAMES, CANDLE_COUNT, FETCH_COUNT,
     WIB, log, api_get, format_price
 )
 
+# Syarat sinyal arah: minimal konfirmasi searah & selisih minimal terhadap sinyal lawan
+MIN_CONFIRMATIONS = 3
+MIN_EDGE = 2
+MIN_CANDLES_REQUIRED = 70
+
 # ============================================================
-# CANDLE DATA PARSER (100 CLOSED CANDLES — INDEPENDEN PER TF)
+# CANDLE DATA PARSER (CLOSED CANDLES — INDEPENDEN PER TF)
 # ============================================================
 
 def extract_candle_list(data):
@@ -23,16 +29,25 @@ def extract_candle_list(data):
 def parse_candle_time(value):
     if value is None:
         raise ValueError("Waktu candle kosong")
+
     if isinstance(value, str):
         value = value.strip()
-        if value.endswith("Z"):
-            value = value[:-1] + "+00:00"
+        if not value:
+            raise ValueError("Waktu candle kosong")
         try:
-            result = datetime.fromisoformat(value)
-            return result.timestamp()
+            number = float(value)  # string numerik (epoch detik / milidetik)
         except ValueError:
-            pass
-    number = float(value)
+            iso = value[:-1] + "+00:00" if value.endswith("Z") else value
+            try:
+                result = datetime.fromisoformat(iso)
+            except ValueError:
+                raise ValueError(f"Format waktu candle tidak dikenal: {value}")
+            if result.tzinfo is None:
+                result = result.replace(tzinfo=timezone.utc)
+            return result.timestamp()
+    else:
+        number = float(value)
+
     if number > 100000000000:
         number /= 1000
     return number
@@ -48,13 +63,18 @@ def normalize_candles(raw):
             if any(item.get(k) is None for k in required):
                 continue
 
+            # Buang candle yang masih berjalan (belum closed)
+            is_open = item.get("isOpen", False)
+            if is_open is True or str(is_open).lower() in ("true", "1"):
+                continue
+
             candle = {
                 "open": float(item["open"]),
                 "high": float(item["high"]),
                 "low": float(item["low"]),
                 "close": float(item["close"]),
                 "time": parse_candle_time(item["openTime"]),
-                "is_open": item.get("isOpen", False)
+                "is_open": False
             }
 
             if candle["high"] < candle["low"]:
@@ -62,10 +82,6 @@ def normalize_candles(raw):
             if candle["high"] < max(candle["open"], candle["close"]):
                 continue
             if candle["low"] > min(candle["open"], candle["close"]):
-                continue
-
-            is_open = candle["is_open"]
-            if is_open is True or str(is_open).lower() in ("true", "1"):
                 continue
 
             candles.append(candle)
@@ -109,57 +125,55 @@ def get_latest_price(symbol):
 
 def get_session_killzone_info(symbol):
     now_wib = datetime.now(WIB)
-    hour = now_wib.hour
-    minute = now_wib.minute
-    total_min = hour * 60 + minute
+    t = now_wib.hour * 60 + now_wib.minute
     jam_str = now_wib.strftime("%H:%M WIB")
 
-    # Pembagian Sesi Akurat (Winter Time WIB):
-    # - USA / New York Session : 20:15 WIB - 03:59 WIB (termasuk jam 00:00 WIB)
-    # - Sydney / Pre-Asia      : 04:00 WIB - 08:44 WIB
-    # - Asia Utama (HK/SG/TKY) : 08:45 WIB - 14:44 WIB
-    # - London / Eropa Session : 14:45 WIB - 20:14 WIB
+    # Pembagian Sesi (Winter Time WIB), tanpa celah waktu:
+    # - Sydney / Pre-Asia      : 04:00 - 08:44
+    # - Asia Open              : 08:45 - 09:30
+    # - Asia Utama (HK/SG/TKY) : 09:31 - 14:44
+    # - London Open            : 14:45 - 16:30
+    # - London Session         : 16:31 - 20:14
+    # - New York Open          : 20:15 - 22:30
+    # - New York / USA Session : 22:31 - 03:59 (lintas tengah malam)
 
-    is_ny_open = (20 * 60 + 15) <= total_min <= (22 * 60 + 30)
-    is_london_open = (14 * 60 + 45) <= total_min <= (16 * 60 + 30)
-    is_asia_open = (8 * 60 + 45) <= total_min <= (9 * 60 + 30)
-
-    if is_ny_open:
+    if 20 * 60 + 15 <= t <= 22 * 60 + 30:
         return (
             f"🚨 NEW YORK OPEN ({jam_str}) — Volatilitas Ekstrem",
             False,
             "WASPADA NY OPEN (Tunggu Rejection M1/M5, Hindari Limit Buta)"
         )
-    if (22 * 60 + 31) <= total_min <= (23 * 60 + 59) or hour < 4:
+    if t >= 22 * 60 + 31 or t < 4 * 60:
         return (
             f"🇺🇸 NEW YORK / USA SESSION ({jam_str}) — Likuiditas Amerika",
             True,
             "AMAN PASANG LIMIT (Pantau London Close 00:00 WIB)"
         )
-    if is_london_open:
+    if 14 * 60 + 45 <= t <= 16 * 60 + 30:
         return (
             f"⚠️ LONDON OPEN ({jam_str}) — Rawan Sapuan Likuiditas",
             False,
             "WASPADA LONDON OPEN (Gunakan Konfirmasi Rejection M1/M5)"
         )
-    if 15 <= hour < 20:
+    if 16 * 60 + 31 <= t <= 20 * 60 + 14:
         return (
             f"⚡ LONDON SESSION ({jam_str}) — Struktur Rapi",
             True,
             "AMAN PASANG LIMIT (Zona Struktur Efektif)"
         )
-    if is_asia_open:
+    if 8 * 60 + 45 <= t <= 9 * 60 + 30:
         return (
             f"🌏 ASIA OPEN ({jam_str}) — Likuiditas Penuh Asia",
             True,
             "AMAN PASANG LIMIT (Pantau Range Pagi)"
         )
-    if 8 <= hour < 15:
+    if 9 * 60 + 31 <= t <= 14 * 60 + 44:
         return (
             f"🌏 ASIA SESSION ({jam_str}) — Range Terkontrol",
             True,
             "AMAN PASANG LIMIT (Ideal untuk Pantulan Range)"
         )
+    # 04:00 - 08:44
     if symbol == "BTCUSD":
         return (
             f"🌐 CRYPTO 24/7 SESSION ({jam_str}) — Likuiditas Aktif",
@@ -212,9 +226,8 @@ def _calc_avg_range(candles, period=20):
 def detect_ob(candles):
     """
     1. Order Block (OB) Segar (Unmitigated):
-    Mencari candle terakhir berlawanan arah sebelum dorongan impulsif yang belum pernah
-    ditembus close candle berikutnya, lalu memeriksa apakah harga sekarang sedang
-    menyentuh zona OB tersebut.
+    Candle terakhir berlawanan arah sebelum dorongan impulsif yang belum pernah
+    ditembus close candle berikutnya, dan harga sekarang menyentuh zona OB tersebut.
     """
     price = candles[-1]["close"]
     last_low = candles[-1]["low"]
@@ -223,14 +236,15 @@ def detect_ob(candles):
     avg_range = _calc_avg_range(lookback, 25)
     buffer = avg_range * 0.30
 
-    for i in range(len(lookback) - 3, 4, -1):
+    # i + 1 boleh sampai candle terakhir lookback (dorongan paling baru ikut terdeteksi)
+    for i in range(len(lookback) - 2, 0, -1):
         ob = lookback[i]
         c1 = lookback[i + 1]
         ob_low, ob_high = ob["low"], ob["high"]
+        c1_rng = c1["high"] - c1["low"]
 
         # Bullish OB: candle turun diikuti dorongan naik kuat
         if ob["close"] < ob["open"]:
-            c1_rng = c1["high"] - c1["low"]
             c1_body = c1["close"] - c1["open"]
             impulsive = c1_rng > 0 and c1_body >= c1_rng * 0.50 and c1["close"] > ob_high
             if impulsive:
@@ -242,7 +256,6 @@ def detect_ob(candles):
 
         # Bearish OB: candle naik diikuti dorongan turun kuat
         if ob["close"] > ob["open"]:
-            c1_rng = c1["high"] - c1["low"]
             c1_body = c1["open"] - c1["close"]
             impulsive = c1_rng > 0 and c1_body >= c1_rng * 0.50 and c1["close"] < ob_low
             if impulsive:
@@ -258,8 +271,8 @@ def detect_ob(candles):
 def detect_fvg(candles):
     """
     2. Fair Value Gap (FVG) Segar (Unmitigated):
-    Hanya aktif jika ada FVG yang belum tertutup penuh oleh candle berikutnya DAN
-    harga berjalan saat ini sedang berada/retest di dalam celah FVG tersebut.
+    Aktif jika ada FVG (ukuran signifikan) yang belum tertutup penuh DAN
+    harga saat ini sedang berada/retest di dalam celah FVG tersebut.
     """
     price = candles[-1]["close"]
     last_low = candles[-1]["low"]
@@ -267,13 +280,14 @@ def detect_fvg(candles):
     lookback = candles[:-1]
     avg_range = _calc_avg_range(lookback, 25)
     buffer = avg_range * 0.20
+    min_gap = avg_range * 0.10  # abaikan gap noise yang terlalu kecil
 
-    for i in range(len(lookback) - 1, 2, -1):
+    for i in range(len(lookback) - 1, 1, -1):
         c1 = lookback[i - 2]
         c3 = lookback[i]
 
         # Bullish FVG (Gap Bawah)
-        if c3["low"] > c1["high"]:
+        if c3["low"] - c1["high"] >= min_gap:
             gap_low = c1["high"]
             gap_high = c3["low"]
             filled = any(lookback[k]["close"] < gap_low for k in range(i + 1, len(lookback)))
@@ -282,7 +296,7 @@ def detect_fvg(candles):
                     return "BUY", gap_low, gap_high
 
         # Bearish FVG (Gap Atas)
-        if c3["high"] < c1["low"]:
+        if c1["low"] - c3["high"] >= min_gap:
             gap_low = c3["high"]
             gap_high = c1["low"]
             filled = any(lookback[k]["close"] > gap_high for k in range(i + 1, len(lookback)))
@@ -296,7 +310,7 @@ def detect_fvg(candles):
 def detect_bos(candles):
     """
     3. Break of Structure (BOS):
-    Mengecek penembusan struktur swing 15 candle terakhir dengan body close valid.
+    Penembusan struktur swing 15 candle terakhir dengan body close valid.
     """
     recent = candles[-1]
     previous = candles[-16:-1]
@@ -312,8 +326,7 @@ def detect_bos(candles):
 def detect_snr(candles):
     """
     4. Support & Resistance (SNR) dengan Konfirmasi Reject Nyata:
-    Aktif jika harga menyentuh Support/Resistance 35 candle terakhir dan menunjukkan
-    penolakan (ekor menusuk zona lalu close mental balik).
+    Harga menyentuh Support/Resistance 35 candle terakhir lalu close mental balik.
     """
     last = candles[-1]
     prev_c = candles[-2]
@@ -340,9 +353,8 @@ def detect_snr(candles):
 def detect_sbr_rbs(candles):
     """
     5. Breakout -> Retest -> Reject (RBS & SBR):
-    Mendeteksi urutan lengkap:
       Tahap 1: Body close menembus Swing High (RBS) atau Swing Low (SBR)
-      Tahap 2: Harga berbalik menyentuh kembali level tembusan (Retest)
+      Tahap 2: Harga kembali menyentuh level tembusan SETELAH breakout (Retest)
       Tahap 3: Candle menolak level tersebut (Reject) -> Sinyal BUY/SELL aktif
     """
     last = candles[-1]
@@ -354,6 +366,7 @@ def detect_sbr_rbs(candles):
 
     avg_range = _calc_avg_range(lookback, 25)
     zone_tol = avg_range * 0.55
+    prev_idx = len(lookback) - 1  # index prev_c di dalam lookback
 
     swing_highs, swing_lows = [], []
     for i in range(2, len(lookback) - 3):
@@ -369,18 +382,18 @@ def detect_sbr_rbs(candles):
         if not break_bars:
             continue
         first_break = break_bars[0]
-        # Pastikan tidak jebol balik ke bawah secara permanen
+        # Level jebol balik ke bawah = RBS gagal
         broken_back = any(lookback[k]["close"] < res_level - zone_tol for k in range(first_break + 1, len(lookback)))
         if broken_back:
             continue
 
-        # Cek apakah sudah retest & reject di level res_level
-        retested = (last["low"] <= res_level + zone_tol) or (prev_c["low"] <= res_level + zone_tol)
+        # Retest valid hanya jika terjadi SETELAH candle breakout (prev_c bukan candle breakout itu sendiri)
+        prev_valid = prev_idx > first_break
+        retested = (last["low"] <= res_level + zone_tol) or (prev_valid and prev_c["low"] <= res_level + zone_tol)
         rejected = price > res_level and (last["close"] > last["open"] or (last["close"] - last["low"]) > (last["high"] - last["close"]))
         if retested and rejected and abs(price - res_level) <= avg_range * 1.3:
             return "BUY", "RBS", res_level, "CONFIRMED"
 
-        # Jika baru breakout dalam 3 candle terakhir & harga belum jauh -> tandai fase BREAKOUT
         if first_break >= len(lookback) - 3 and price > res_level:
             return "NEUTRAL", "RBS", res_level, "BREAKOUT_WAIT_RETEST"
 
@@ -394,7 +407,8 @@ def detect_sbr_rbs(candles):
         if broken_back:
             continue
 
-        retested = (last["high"] >= sup_level - zone_tol) or (prev_c["high"] >= sup_level - zone_tol)
+        prev_valid = prev_idx > first_break
+        retested = (last["high"] >= sup_level - zone_tol) or (prev_valid and prev_c["high"] >= sup_level - zone_tol)
         rejected = price < sup_level and (last["close"] < last["open"] or (last["high"] - last["close"]) > (last["close"] - last["low"]))
         if retested and rejected and abs(sup_level - price) <= avg_range * 1.3:
             return "SELL", "SBR", sup_level, "CONFIRMED"
@@ -408,7 +422,7 @@ def detect_sbr_rbs(candles):
 def detect_snd(candles):
     """
     6. Supply & Demand (SND) Segar (Unmitigated):
-    Hanya mengambil zona Demand/Supply segar yang belum pernah dijebol close berikutnya
+    Zona Demand/Supply segar yang belum pernah dijebol close berikutnya
     dan sedang disentuh oleh harga berjalan.
     """
     price = candles[-1]["close"]
@@ -418,7 +432,8 @@ def detect_snd(candles):
     avg_range = _calc_avg_range(lookback, 25)
     buffer = avg_range * 0.35
 
-    for i in range(len(lookback) - 2, 1, -1):
+    # Mulai dari candle terakhir lookback agar impulse terbaru tidak terlewat
+    for i in range(len(lookback) - 1, 1, -1):
         cur = lookback[i]
         bef = lookback[i - 1]
         rng = cur["high"] - cur["low"]
@@ -447,10 +462,10 @@ def detect_snd(candles):
 
 def detect_rbr_dbd(candles):
     """
-    7. RBR (Rally-Base-Rally) & DBD (Drop-Base-Drop) Realistis (1-4 Candle Base):
-    - DBD: Candle turun panjang -> 1 s/d 4 candle base (koreksi kecil/naik tipis) -> candle turun panjang menembus base.
-    - RBR: Candle naik panjang -> 1 s/d 4 candle base (koreksi kecil/turun tipis) -> candle naik panjang menembus base.
-    - Hanya zona segar (unmitigated) yang belum pernah dijebol close berikutnya.
+    7. RBR (Rally-Base-Rally) & DBD (Drop-Base-Drop) (1-4 Candle Base):
+    - DBD: Drop -> 1-4 candle base -> Drop menembus base.
+    - RBR: Rally -> 1-4 candle base -> Rally menembus base.
+    - Hanya zona segar (unmitigated) yang belum dijebol close berikutnya.
     """
     last = candles[-1]
     price = last["close"]
@@ -492,7 +507,7 @@ def detect_rbr_dbd(candles):
             z_low = min(bc["low"] for bc in base_slice)
             z_high = max(bc["high"] for bc in base_slice)
 
-            # RBR: Rally -> Base (1-4 candle) -> Rally menembus z_high
+            # RBR
             if is_impulse_bull(leg1) and is_impulse_bull(leg2) and leg2["close"] > z_high:
                 invalidated = any(lookback[k]["close"] < z_low - buffer for k in range(leg2_idx + 1, len(lookback)))
                 if not invalidated:
@@ -500,7 +515,7 @@ def detect_rbr_dbd(candles):
                     if in_zone:
                         return "BUY", "RBR", z_low, z_high
 
-            # DBD: Drop -> Base (1-4 candle) -> Drop menembus z_low
+            # DBD
             if is_impulse_bear(leg1) and is_impulse_bear(leg2) and leg2["close"] < z_low:
                 invalidated = any(lookback[k]["close"] > z_high + buffer for k in range(leg2_idx + 1, len(lookback)))
                 if not invalidated:
@@ -517,8 +532,9 @@ def detect_rbr_dbd(candles):
 
 def find_tight_pending_limits(candles):
     """
-    Mencari zona segar terdekat di atas harga (SELL LIMIT) dan di bawah harga (BUY LIMIT)
-    dengan jarak pip terbatas (maksimal 4x avg_range) agar realistis cepat dijemput.
+    Zona segar terdekat di atas harga (SELL LIMIT) dan di bawah harga (BUY LIMIT)
+    dengan jarak terbatas (0.45x - 4x avg_range) agar realistis cepat dijemput.
+    Kandidat: OB segar (dorongan impulsif) dan FVG segar. Fallback: swing terdekat.
     """
     price = candles[-1]["close"]
     lookback = candles[-70:-1]
@@ -530,13 +546,16 @@ def find_tight_pending_limits(candles):
     sell_candidates = []
     buy_candidates = []
 
-    # 1. Kandidat dari Unmitigated OB & Unmitigated Base (RBR/DBD) dalam jarak 0.45x - 4x avg_range
+    # 1. Kandidat OB segar
     for i in range(len(lookback) - 2, 2, -1):
         c = lookback[i]
         c1 = lookback[i + 1]
+        c1_rng = c1["high"] - c1["low"]
+        if c1_rng <= 0:
+            continue
 
-        # Zona Atas (Bearish OB / Supply Base) -> SELL LIMIT
-        if c["close"] > c["open"] and c1["close"] < c["low"]:
+        # Bearish OB -> SELL LIMIT (zona di atas harga)
+        if c["close"] > c["open"] and c1["close"] < c["low"] and (c1["open"] - c1["close"]) >= c1_rng * 0.50:
             z_low, z_high = c["low"], c["high"]
             dist = z_low - price
             if min_dist <= dist <= max_dist:
@@ -544,8 +563,8 @@ def find_tight_pending_limits(candles):
                 if not mitigated:
                     sell_candidates.append((dist, "Fresh Bearish OB", z_low, z_high))
 
-        # Zona Bawah (Bullish OB / Demand Base) -> BUY LIMIT
-        if c["close"] < c["open"] and c1["close"] > c["high"]:
+        # Bullish OB -> BUY LIMIT (zona di bawah harga)
+        if c["close"] < c["open"] and c1["close"] > c["high"] and (c1["close"] - c1["open"]) >= c1_rng * 0.50:
             z_low, z_high = c["low"], c["high"]
             dist = price - z_high
             if min_dist <= dist <= max_dist:
@@ -553,7 +572,7 @@ def find_tight_pending_limits(candles):
                 if not mitigated:
                     buy_candidates.append((dist, "Fresh Bullish OB", z_low, z_high))
 
-    # 2. Kandidat dari Unmitigated FVG dalam jarak dekat
+    # 2. Kandidat FVG segar
     for i in range(len(lookback) - 1, 2, -1):
         c1 = lookback[i - 2]
         c3 = lookback[i]
@@ -573,12 +592,11 @@ def find_tight_pending_limits(candles):
                 if not filled:
                     buy_candidates.append((dist, "Fresh Bullish FVG", g_low, g_high))
 
-    # Pilih kandidat terdekat yang paling cepat dijemput
+    # SELL LIMIT
     if sell_candidates:
         sell_candidates.sort(key=lambda x: x[0])
         _, s_label, s_low, s_high = sell_candidates[0]
     else:
-        # Fallback terdekat dari swing high dalam 25 candle terakhir (di-clamp maks 3.5x avg_range)
         recent_high = max(c["high"] for c in lookback[-25:])
         target_high = min(recent_high, price + avg_range * 3.2)
         if target_high <= price + min_dist:
@@ -601,6 +619,7 @@ def find_tight_pending_limits(candles):
         "tp3": s_entry - s_risk * 3.5
     }
 
+    # BUY LIMIT
     if buy_candidates:
         buy_candidates.sort(key=lambda x: x[0])
         _, b_label, b_low, b_high = buy_candidates[0]
@@ -634,17 +653,27 @@ def find_tight_pending_limits(candles):
 # KALKULATOR LOT & ANALISA SINGLE TIMEFRAME
 # ============================================================
 
-def calculate_lot_recommendation(symbol, balance, risk_pct, entry_price, sl_price):
-    if not balance or not risk_pct or not sl_price or not entry_price:
+def calculate_lot_recommendation(symbol, balance, risk_pct, entry_price, sl_price, rr=2.0):
+    try:
+        if not balance or not risk_pct or not sl_price or not entry_price:
+            return None
+        risk_usd = float(balance) * (float(risk_pct) / 100.0)
+        sl_dist = abs(float(entry_price) - float(sl_price))
+    except (TypeError, ValueError):
         return None
-    risk_usd = float(balance) * (float(risk_pct) / 100.0)
-    sl_dist = abs(float(entry_price) - float(sl_price))
-    if sl_dist <= 0:
+    if sl_dist <= 0 or risk_usd <= 0:
         return None
 
     contract_size = 100.0 if symbol == "XAUUSD" else 1.0
     raw_lot = risk_usd / (sl_dist * contract_size)
-    lot = max(0.01, round(raw_lot, 2))
+
+    # Dibulatkan KE BAWAH agar kerugian tidak pernah melebihi risiko yang ditetapkan
+    lot = math.floor(raw_lot * 100 + 1e-9) / 100.0
+    over_risk = False
+    if lot < 0.01:
+        lot = 0.01
+        over_risk = (lot * sl_dist * contract_size) > risk_usd * 1.0001
+
     actual_loss = lot * sl_dist * contract_size
     return {
         "balance": float(balance),
@@ -652,12 +681,31 @@ def calculate_lot_recommendation(symbol, balance, risk_pct, entry_price, sl_pric
         "risk_usd": risk_usd,
         "lot": lot,
         "actual_loss": actual_loss,
-        "tp2_profit": actual_loss * 2.0
+        "tp2_profit": actual_loss * rr,
+        "over_risk": over_risk
     }
+
+
+def _worst_entry(result):
+    """Harga fill terburuk (dipakai untuk hitung lot konservatif)."""
+    if result["direction"] == "BUY":
+        return result["entry_high"]
+    if result["direction"] == "SELL":
+        return result["entry_low"]
+    return result["price"]
+
+
+def _lot_text(lot_info):
+    txt = f"{lot_info['lot']:.2f} Lot (SL -${lot_info['actual_loss']:,.2f})"
+    if lot_info.get("over_risk"):
+        txt += " ⚠️ lot minimum melebihi batas risiko"
+    return txt
 
 
 def analyze_market(symbol, timeframe):
     candles = get_candles(symbol, timeframe)
+    if len(candles) < MIN_CANDLES_REQUIRED:
+        raise ValueError(f"Candle kurang untuk analisa ({len(candles)} < {MIN_CANDLES_REQUIRED})")
     last = candles[-1]
     price = last["close"]
 
@@ -686,21 +734,26 @@ def analyze_market(symbol, timeframe):
     sell_votes = sum(v == "SELL" for v in signals.values())
 
     if buy_votes > sell_votes:
-        direction = "BUY"
-        confirmations = buy_votes
+        bias, lead, opp = "BUY", buy_votes, sell_votes
     elif sell_votes > buy_votes:
-        direction = "SELL"
-        confirmations = sell_votes
+        bias, lead, opp = "SELL", sell_votes, buy_votes
+    else:
+        bias, lead, opp = "WAIT", max(buy_votes, sell_votes), min(buy_votes, sell_votes)
+
+    # Arah hanya valid jika cukup konfirmasi DAN unggul jelas atas sinyal lawan
+    if bias != "WAIT" and lead >= MIN_CONFIRMATIONS and (lead - opp) >= MIN_EDGE:
+        direction = bias
+        if lead >= 5:
+            status = "SANGAT KUAT"
+        else:
+            status = "KUAT"
     else:
         direction = "WAIT"
-        confirmations = max(buy_votes, sell_votes)
-
-    if direction == "WAIT" or confirmations < 3:
-        status = "BELUM ADA SETUP INSTAN KUAT"
-    elif confirmations in (3, 4):
-        status = "KUAT"
-    else:
-        status = "SANGAT KUAT"
+        if bias != "WAIT" and lead >= MIN_CONFIRMATIONS and opp >= 2:
+            status = "BELUM ADA SETUP INSTAN KUAT (SINYAL BERTENTANGAN)"
+        else:
+            status = "BELUM ADA SETUP INSTAN KUAT"
+    confirmations = lead
 
     avg_range = _calc_avg_range(candles, 14)
 
@@ -729,6 +782,9 @@ def analyze_market(symbol, timeframe):
         "timeframe": timeframe,
         "price": price,
         "direction": direction,
+        "bias": bias,
+        "buy_votes": buy_votes,
+        "sell_votes": sell_votes,
         "confirmations": confirmations,
         "total_indicators": len(signals),
         "status": status,
@@ -775,16 +831,16 @@ def _format_pending_limits_section(result, risk_profile=None):
     if risk_profile:
         s_lot = calculate_lot_recommendation(
             sym, risk_profile.get("balance"), risk_profile.get("risk_pct"),
-            sl_ord["entry"], sl_ord["sl"]
+            sl_ord["entry"], sl_ord["sl"], rr=2.5
         )
         b_lot = calculate_lot_recommendation(
             sym, risk_profile.get("balance"), risk_profile.get("risk_pct"),
-            bl_ord["entry"], bl_ord["sl"]
+            bl_ord["entry"], bl_ord["sl"], rr=2.5
         )
         if s_lot:
-            sell_lot_txt = f" | Lot: {s_lot['lot']:.2f}"
+            sell_lot_txt = f" | Lot: {s_lot['lot']:.2f}" + (" ⚠️" if s_lot["over_risk"] else "")
         if b_lot:
-            buy_lot_txt = f" | Lot: {b_lot['lot']:.2f}"
+            buy_lot_txt = f" | Lot: {b_lot['lot']:.2f}" + (" ⚠️" if b_lot["over_risk"] else "")
 
     return [
         "",
@@ -853,7 +909,15 @@ def create_report(result, risk_profile=None, title_prefix="📊 ANALISA SMC SCAL
         f"Likuiditas: {result['sweep_desc']}",
         "",
         f"{emoji} ARAH INSTAN: {direction}",
-        f"Status: {result['status']} ({result['confirmations']}/{result['total_indicators']} Konfirmasi)",
+        f"Status: {result['status']} ({result['confirmations']}/{result['total_indicators']} Konfirmasi)"
+    ]
+
+    if direction == "WAIT" and result.get("bias") in ("BUY", "SELL"):
+        lines.append(
+            f"Condong: {result['bias']} (BUY {result['buy_votes']} vs SELL {result['sell_votes']}) — belum cukup untuk eksekusi"
+        )
+
+    lines.extend([
         "",
         "📌 KONFIRMASI SMC & PRICE ACTION",
         f"• OB Segar: {ob_text}",
@@ -863,10 +927,9 @@ def create_report(result, risk_profile=None, title_prefix="📊 ANALISA SMC SCAL
         f"• SBR/RBS: {sbr_text}",
         f"• SND Segar: {snd_text}",
         f"• RBR/DBD: {rbr_text}"
-    ]
+    ])
 
     if direction in ("BUY", "SELL"):
-        entry_mid = (result["entry_low"] + result["entry_high"]) / 2.0
         lines.extend([
             "",
             "⚡ EKSEKUSI INSTAN (MARKET ORDER)",
@@ -880,13 +943,13 @@ def create_report(result, risk_profile=None, title_prefix="📊 ANALISA SMC SCAL
                 result["symbol"],
                 risk_profile.get("balance"),
                 risk_profile.get("risk_pct"),
-                entry_mid,
+                _worst_entry(result),
                 result["sl"]
             )
             if lot_info:
                 lines.append(
                     f"💼 Lot Instan (${lot_info['balance']:,.0f} | Risk {lot_info['risk_pct']:.1f}%): "
-                    f"{lot_info['lot']:.2f} Lot (SL -${lot_info['actual_loss']:,.2f})"
+                    f"{_lot_text(lot_info)}"
                 )
 
     lines.extend(_format_pending_limits_section(result, risk_profile))
@@ -933,6 +996,8 @@ def analyze_confluence_pro(symbol, risk_profile=None):
 
     def badge(r):
         ic = {"BUY": "🟢", "SELL": "🔴", "WAIT": "⚪"}.get(r["direction"], "⚪")
+        if r["direction"] == "WAIT" and r.get("bias") in ("BUY", "SELL"):
+            return f"{ic} WAIT (condong {r['bias']} {r['confirmations']}/7)"
         return f"{ic} {r['direction']} ({r['confirmations']}/7 • {r['status']})"
 
     lines = [
@@ -958,7 +1023,6 @@ def analyze_confluence_pro(symbol, risk_profile=None):
         res_m15 if res_m15["direction"] in ("BUY", "SELL") else res_h1
     )
     if exec_res["direction"] in ("BUY", "SELL"):
-        entry_mid = (exec_res["entry_low"] + exec_res["entry_high"]) / 2.0
         lines.extend([
             "",
             f"⚡ EKSEKUSI INSTAN ({exec_res['timeframe']} — {exec_res['direction']})",
@@ -972,13 +1036,13 @@ def analyze_confluence_pro(symbol, risk_profile=None):
                 symbol,
                 risk_profile.get("balance"),
                 risk_profile.get("risk_pct"),
-                entry_mid,
+                _worst_entry(exec_res),
                 exec_res["sl"]
             )
             if lot_info:
                 lines.append(
                     f"💼 Lot Instan (${lot_info['balance']:,.0f} | {lot_info['risk_pct']:.1f}%): "
-                    f"{lot_info['lot']:.2f} Lot (SL -${lot_info['actual_loss']:,.2f})"
+                    f"{_lot_text(lot_info)}"
                 )
 
     # Sinyal Pending Limit dari M15
@@ -1026,7 +1090,6 @@ def format_auto_signal_alert(sig_bundle, risk_profile=None):
     r_m5 = sig_bundle["m5"]
 
     emoji = "🟢" if direction == "BUY" else "🔴"
-    entry_mid = (r_m5["entry_low"] + r_m5["entry_high"]) / 2.0
 
     lines = [
         f"🚨 SINYAL OTOMATIS 3-TF (H1 + M15 + M5) — {sym}",
@@ -1053,13 +1116,14 @@ def format_auto_signal_alert(sig_bundle, risk_profile=None):
             sym,
             risk_profile.get("balance"),
             risk_profile.get("risk_pct"),
-            entry_mid,
+            _worst_entry(r_m5),
             r_m5["sl"]
         )
         if lot_info:
+            warn = " ⚠️ lot minimum melebihi batas risiko" if lot_info["over_risk"] else ""
             lines.extend([
                 "",
-                f"💼 Rekomendasi Lot (${lot_info['balance']:,.0f} | Risk {lot_info['risk_pct']:.1f}%): {lot_info['lot']:.2f} Lot"
+                f"💼 Rekomendasi Lot (${lot_info['balance']:,.0f} | Risk {lot_info['risk_pct']:.1f}%): {lot_info['lot']:.2f} Lot{warn}"
             ])
 
     lines.extend([
