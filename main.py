@@ -84,7 +84,7 @@ log = logging.getLogger("SMC_BOT")
 SESSION = requests.Session()
 
 SESSION.headers.update({
-    "User-Agent": "Mozilla/5.0 SMC-Bot/2.1",
+    "User-Agent": "Mozilla/5.0 SMC-Bot/2.2",
     "Accept": "application/json"
 })
 
@@ -524,7 +524,6 @@ def detect_sbr_rbs(candles):
     swing_highs = []
     swing_lows = []
 
-    # Identifikasi Swing High & Swing Low menggunakan fraktal 2-candle kiri & kanan
     for i in range(2, len(lookback) - 2):
         h = lookback[i]["high"]
         l = lookback[i]["low"]
@@ -545,28 +544,26 @@ def detect_sbr_rbs(candles):
         ):
             swing_lows.append((i, l))
 
-    # Cek RBS (Resistance ditembus ke atas -> jadi Support) dari yang terbaru
+    # Cek RBS (Resistance ditembus ke atas -> jadi Support)
     for idx, res_level in reversed(swing_highs):
         broken_up = any(
             lookback[k]["close"] > res_level
             for k in range(idx + 2, len(lookback))
         )
         if broken_up:
-            # Harga sedang retest di sekitar bekas resistance dan bertahan di atas/dekat zona
             if (
                 abs(price - res_level) <= threshold
                 and price >= res_level - (threshold * 0.5)
             ):
                 return "BUY", "RBS", res_level
 
-    # Cek SBR (Support ditembus ke bawah -> jadi Resistance) dari yang terbaru
+    # Cek SBR (Support ditembus ke bawah -> jadi Resistance)
     for idx, sup_level in reversed(swing_lows):
         broken_down = any(
             lookback[k]["close"] < sup_level
             for k in range(idx + 2, len(lookback))
         )
         if broken_down:
-            # Harga sedang retest di sekitar bekas support dan tertahan di bawah/dekat zona
             if (
                 abs(price - sup_level) <= threshold
                 and price <= sup_level + (threshold * 0.5)
@@ -678,7 +675,6 @@ def detect_rbr_dbd(candles):
         body = abs(c["close"] - c["open"])
         return (body / rng) <= 0.50
 
-    # Pindai dari pola paling baru ke lama
     for i in range(len(lookback) - 4, -1, -1):
         leg1 = lookback[i]
 
@@ -702,7 +698,6 @@ def detect_rbr_dbd(candles):
                 and is_strong_bull(leg2)
                 and leg2["close"] > zone_high
             ):
-                # Pastikan zona belum ditembus turun secara valid setelah terbentuk
                 invalidated = any(
                     lookback[k]["close"] < zone_low - buffer
                     for k in range(leg2_idx + 1, len(lookback))
@@ -716,7 +711,6 @@ def detect_rbr_dbd(candles):
                 and is_strong_bear(leg2)
                 and leg2["close"] < zone_low
             ):
-                # Pastikan zona belum ditembus naik secara valid setelah terbentuk
                 invalidated = any(
                     lookback[k]["close"] > zone_high + buffer
                     for k in range(leg2_idx + 1, len(lookback))
@@ -882,7 +876,6 @@ def create_report(result):
         "WAIT": "⚪"
     }.get(direction, "⚪")
 
-    # Format label detail untuk SBR/RBS
     sbr_rbs_sig = result["signals"]["SBR_RBS"]
     if sbr_rbs_sig != "NEUTRAL" and result["sbr_rbs_level"] is not None:
         sbr_rbs_text = (
@@ -892,7 +885,6 @@ def create_report(result):
     else:
         sbr_rbs_text = sbr_rbs_sig
 
-    # Format label detail untuk RBR/DBD
     rbr_dbd_sig = result["signals"]["RBR_DBD"]
     if (
         rbr_dbd_sig != "NEUTRAL"
@@ -953,7 +945,7 @@ def create_report(result):
 
 
 # ============================================================
-# CALENDAR & NEWS (US FOCUS + XAUUSD IMPACT + BAHASA INDONESIA)
+# CALENDAR & NEWS (US FOCUS + XAUUSD IMPACT + BAHASA AWAM + %)
 # ============================================================
 
 def get_calendar():
@@ -998,64 +990,99 @@ def _impact_rank_and_badge(raw_impact, title_en):
     )
 
     if imp in ("high", "3", "red", "tinggi") or any(k in t for k in high_keywords):
-        return 3, "🔴 HIGH IMPACT"
+        return 3, "🔴 DAMPAK BESAR (HIGH)"
 
     if imp in ("medium", "moderate", "2", "orange", "yellow", "sedang"):
-        return 2, "🟡 MEDIUM IMPACT"
+        return 2, "🟡 DAMPAK SEDANG (MEDIUM)"
 
-    return 1, "🟢 LOW IMPACT"
+    return 1, "🟢 DAMPAK KECIL (LOW)"
 
 
-def analyze_xau_event_impact(title_en, actual_raw, forecast_raw):
+def analyze_xau_event_impact(title_en, actual_raw, forecast_raw, impact_rank=2):
     """
-    Menghasilkan analisa dampak spesifik data ekonomi US terhadap XAUUSD.
+    Menjelaskan dampak data ekonomi US terhadap harga Emas (XAUUSD)
+    dengan bahasa awam yang mudah dipahami beserta angka persentase peluangnya.
     """
     t = title_en.lower()
 
+    # Persentase kekuatan pengaruh berita terhadap arah Emas
+    pct_by_rank = {
+        3: "80%",
+        2: "65%",
+        1: "55%"
+    }
+    peluang_pct = pct_by_rank.get(impact_rank, "65%")
+
+    # Indikator yang sifatnya terbalik (jika angka naik = Dolar melemah = Emas naik)
     inverse_usd = any(
         k in t for k in ("unemployment", "jobless claims", "layoff")
     )
 
+    # Penjelasan sederhana tentang apa data ekonomi ini
+    if any(k in t for k in ("cpi", "ppi", "pce", "inflation")):
+        driver = "Mengukur kenaikan harga barang di AS (sangat memengaruhi suku bunga)."
+    elif any(k in t for k in ("nfp", "non-farm", "nonfarm", "payroll", "employment", "jobless", "adp")):
+        driver = "Mengukur kondisi lapangan kerja di AS (penggerak cepat harga emas)."
+    elif any(k in t for k in ("fomc", "interest rate", "powell", "fed")):
+        driver = "Keputusan suku bunga bank sentral AS (kunci utama naik-turunnya emas)."
+    elif any(k in t for k in ("gdp", "retail sales", "pmi")):
+        driver = "Mengukur kekuatan ekonomi dan daya belanja masyarakat AS."
+    else:
+        driver = "Laporan ekonomi Dolar AS (biasanya bergerak berlawanan dengan Emas)."
+
     actual_num = parse_numeric_metric(actual_raw)
     forecast_num = parse_numeric_metric(forecast_raw)
 
-    if any(k in t for k in ("cpi", "ppi", "pce", "inflation")):
-        driver = "Data inflasi US (penentu arah suku bunga The Fed)."
-    elif any(k in t for k in ("nfp", "non-farm", "nonfarm", "payroll", "employment", "jobless", "adp")):
-        driver = "Data tenaga kerja US (sensitif pada volatilitas XAUUSD)."
-    elif any(k in t for k in ("fomc", "interest rate", "powell", "fed")):
-        driver = "Kebijakan moneter The Fed & pergerakan Yield US10Y."
-    elif any(k in t for k in ("gdp", "retail sales", "pmi")):
-        driver = "Indikator kekuatan ekonomi & daya beli Amerika Serikat."
-    else:
-        driver = "Indikator makro USD (berkorelasi terbalik dengan Emas)."
-
+    # 1. Jika hasil asli sudah keluar
     if actual_num is not None and forecast_num is not None:
         if actual_num == forecast_num:
-            return f"{driver}\n⚖️ <b>Efek XAUUSD:</b> Sesuai prediksi (Netral / pantau reaksi teknikal)."
+            return (
+                f"{driver}\n"
+                "⚖️ <b>Efek ke Emas:</b> Hasil sama persis dengan perkiraan "
+                "(Harga cenderung datar / peluang gerak <b>50%</b>)."
+            )
 
         is_higher = actual_num > forecast_num
 
         if inverse_usd:
             if is_higher:
-                return f"{driver}\n🟢 <b>Efek XAUUSD:</b> Klaim/Pengangguran naik di atas prediksi ➔ USD melemah, <b>Potensi Bullish XAUUSD</b>."
-            return f"{driver}\n🔴 <b>Efek XAUUSD:</b> Klaim/Pengangguran turun di bawah prediksi ➔ USD menguat, <b>Potensi Bearish XAUUSD</b>."
+                return (
+                    f"{driver}\n"
+                    f"🟢 <b>Efek ke Emas:</b> Pengangguran lebih tinggi dari perkiraan (Dolar melemah) "
+                    f"➔ Harga Emas berpotensi <b>NAIK 📈 (Peluang {peluang_pct})</b>."
+                )
+            return (
+                f"{driver}\n"
+                f"🔴 <b>Efek ke Emas:</b> Pengangguran lebih rendah dari perkiraan (Dolar menguat) "
+                f"➔ Harga Emas berpotensi <b>TURUN 📉 (Peluang {peluang_pct})</b>."
+            )
         else:
             if is_higher:
-                return f"{driver}\n🔴 <b>Efek XAUUSD:</b> Data US lebih kuat dari prediksi ➔ USD & Yield naik, <b>Potensi Bearish XAUUSD</b>."
-            return f"{driver}\n🟢 <b>Efek XAUUSD:</b> Data US di bawah prediksi ➔ USD melemah, <b>Potensi Bullish XAUUSD</b>."
+                return (
+                    f"{driver}\n"
+                    f"🔴 <b>Efek ke Emas:</b> Hasil lebih tinggi dari perkiraan (Dolar menguat) "
+                    f"➔ Harga Emas berpotensi <b>TURUN 📉 (Peluang {peluang_pct})</b>."
+                )
+            return (
+                f"{driver}\n"
+                f"🟢 <b>Efek ke Emas:</b> Hasil lebih rendah dari perkiraan (Dolar melemah) "
+                f"➔ Harga Emas berpotensi <b>NAIK 📈 (Peluang {peluang_pct})</b>."
+            )
 
+    # 2. Jika hasil belum keluar (Panduan sebelum berita rilis)
     if inverse_usd:
         return (
             f"{driver}\n"
-            "💡 <b>Skenario XAU:</b> Aktual &gt; Prediksi ➔ <b>Bullish XAU 🟢</b> | "
-            "Aktual &lt; Prediksi ➔ <b>Bearish XAU 🔴</b>"
+            f"💡 <b>Panduan Emas (XAUUSD):</b>\n"
+            f"• Jika hasil <b>LEBIH TINGGI</b> dari perkiraan ➔ Emas berpotensi <b>NAIK 📈 (Peluang {peluang_pct})</b>\n"
+            f"• Jika hasil <b>LEBIH RENDAH</b> dari perkiraan ➔ Emas berpotensi <b>TURUN 📉 (Peluang {peluang_pct})</b>"
         )
 
     return (
         f"{driver}\n"
-        "💡 <b>Skenario XAU:</b> Aktual &gt; Prediksi ➔ <b>Bearish XAU 🔴</b> | "
-        "Aktual &lt; Prediksi ➔ <b>Bullish XAU 🟢</b>"
+        f"💡 <b>Panduan Emas (XAUUSD):</b>\n"
+        f"• Jika hasil <b>LEBIH TINGGI</b> dari perkiraan ➔ Emas berpotensi <b>TURUN 📉 (Peluang {peluang_pct})</b>\n"
+        f"• Jika hasil <b>LEBIH RENDAH</b> dari perkiraan ➔ Emas berpotensi <b>NAIK 📈 (Peluang {peluang_pct})</b>"
     )
 
 
@@ -1131,7 +1158,7 @@ def format_calendar_data(data):
 
     active_list = upcoming_or_today if upcoming_or_today else all_parsed
 
-    # Urutkan: Tanggal terdekat dulu -> High Impact di atas -> Jam rilis terawal
+    # Urutkan: Tanggal terdekat dulu -> Dampak Besar di atas -> Jam rilis terawal
     active_list.sort(
         key=lambda x: (
             x[0].date() if x[0] else datetime.max.date(),
@@ -1140,7 +1167,7 @@ def format_calendar_data(data):
         )
     )
 
-    top_events = active_list[:8]
+    top_events = active_list[:7]
 
     titles_en = [entry[3] for entry in top_events]
     titles_id = translate_texts_to_id(titles_en)
@@ -1149,14 +1176,14 @@ def format_calendar_data(data):
     tgl_hari_ini = f"{now_wib.day:02d} {bulan_sekarang} {now_wib.year}"
 
     header = (
-        f"<b>📅 KALENDER EKONOMI US (FOKUS XAUUSD)</b>\n"
-        f"<i>Mulai {tgl_hari_ini} (WIB) • Prioritas Impact Tinggi</i>\n"
+        f"<b>📅 JADWAL EKONOMI US (PANDUAN EMAS)</b>\n"
+        f"<i>Mulai {tgl_hari_ini} (Jam WIB) • Bahasa Sederhana</i>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
     )
 
     footer = (
         "\n━━━━━━━━━━━━━━━━━━━━\n"
-        "<i>⚠️ Waspada pelebaran spread XAUUSD 15 menit sebelum &amp; sesudah rilis High Impact.</i>"
+        "<i>⚠️ Hindari masuk posisi 15 menit sebelum &amp; sesudah berita Dampak Besar karena harga emas bergejolak cepat.</i>"
     )
 
     body_blocks = []
@@ -1191,17 +1218,17 @@ def format_calendar_data(data):
             or item.get("prior")
         )
 
-        act_str = html.escape(str(actual)) if actual not in (None, "") else "⏳ Belum rilis"
+        act_str = html.escape(str(actual)) if actual not in (None, "") else "⏳ Belum keluar"
         fc_str = html.escape(str(forecast)) if forecast not in (None, "") else "-"
         prev_str = html.escape(str(previous)) if previous not in (None, "") else "-"
 
-        xau_note = analyze_xau_event_impact(title_en, actual, forecast)
+        xau_note = analyze_xau_event_impact(title_en, actual, forecast, rank)
 
         block = (
             f"\n<b>{idx + 1}. {display_title}</b>\n"
             f"🇺🇸 USD | {badge}{is_today_tag}\n"
             f"🕒 <code>{time_wib}</code>\n"
-            f"📊 Aktual: <b>{act_str}</b> | Prediksi: <b>{fc_str}</b> | Sblm: <b>{prev_str}</b>\n"
+            f"📊 Hasil Asli: <b>{act_str}</b> | Perkiraan: <b>{fc_str}</b> | Lalu: <b>{prev_str}</b>\n"
             f"<blockquote>{xau_note}</blockquote>\n"
         )
 
@@ -1216,7 +1243,7 @@ def format_calendar_data(data):
 
 def analyze_xau_news_sentiment(text_en):
     """
-    Mendeteksi relevansi dan arah sentimen berita terhadap XAUUSD.
+    Mendeteksi pengaruh berita terhadap Emas (XAUUSD) dengan bahasa awam + angka %.
     """
     t = text_en.lower()
 
@@ -1246,13 +1273,25 @@ def analyze_xau_news_sentiment(text_en):
     )
 
     if any(k in t for k in bullish_xau_signals):
-        sentiment = "🟢 <b>Sentimen XAUUSD:</b> Potensi Bullish (Dukungan Safe Haven / USD Melemah)"
+        sentiment = (
+            "🟢 <b>Pengaruh ke Emas:</b> Harga Emas berpotensi <b>NAIK 📈 (Peluang 75%)</b> "
+            "— Dolar AS melemah / investor memburu aset aman."
+        )
     elif any(k in t for k in bearish_xau_signals):
-        sentiment = "🔴 <b>Sentimen XAUUSD:</b> Potensi Bearish (Tekanan Penguatan USD &amp; Yield)"
+        sentiment = (
+            "🔴 <b>Pengaruh ke Emas:</b> Harga Emas berpotensi <b>TURUN 📉 (Peluang 75%)</b> "
+            "— Dolar AS menguat sehingga menekan harga emas."
+        )
     elif is_xau_related:
-        sentiment = "🟡 <b>Sentimen XAUUSD:</b> Katalis Makro Penting (Pantau Volatilitas USD)"
+        sentiment = (
+            "🟡 <b>Pengaruh ke Emas:</b> Berita penting penggerak Emas "
+            "<b>(Peluang gerak 60%)</b> — Pantau pergerakan Dolar AS."
+        )
     else:
-        sentiment = "⚪ <b>Sentimen XAUUSD:</b> Info Pasar Umum US (Dampak Tidak Langsung)"
+        sentiment = (
+            "⚪ <b>Pengaruh ke Emas:</b> Berita umum ekonomi AS "
+            "<b>(Dampak kecil ~50%)</b> — Tidak langsung ke emas."
+        )
 
     return is_xau_related, sentiment
 
@@ -1262,10 +1301,10 @@ def format_news_data(data):
     items = _extract_list_payload(data)
 
     if items is None:
-        return "<b>📰 BERITA MARKET US &amp; XAUUSD</b>\n\nFormat data tidak dikenali."
+        return "<b>📰 BERITA MARKET US &amp; EMAS (XAUUSD)</b>\n\nFormat data tidak dikenali."
 
     if not items:
-        return "<b>📰 BERITA MARKET US &amp; XAUUSD</b>\n\nBelum ada berita terbaru."
+        return "<b>📰 BERITA MARKET US &amp; EMAS (XAUUSD)</b>\n\nBelum ada berita terbaru."
 
     scored_news = []
     for item in items:
@@ -1305,7 +1344,7 @@ def format_news_data(data):
     top_news = scored_news[:6]
 
     if not top_news:
-        return "<b>📰 BERITA MARKET US &amp; XAUUSD</b>\n\nBelum ada berita valid."
+        return "<b>📰 BERITA MARKET US &amp; EMAS (XAUUSD)</b>\n\nBelum ada berita valid."
 
     texts_to_translate = []
     for _, _, _, title_en, summary_en, _ in top_news:
@@ -1315,14 +1354,14 @@ def format_news_data(data):
     translated_all = translate_texts_to_id(texts_to_translate)
 
     header = (
-        "<b>📰 BERITA MARKET US &amp; DAMPAK XAUUSD</b>\n"
-        "<i>Diterjemahkan otomatis ke Bahasa Indonesia</i>\n"
+        "<b>📰 BERITA TERKINI US &amp; EFEK KE EMAS (XAUUSD)</b>\n"
+        "<i>Terjemahan Bahasa Indonesia • Dilengkapi Estimasi %</i>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
     )
 
     footer = (
         "\n━━━━━━━━━━━━━━━━━━━━\n"
-        "<i>💡 Berita bertanda <b>FOKUS XAUUSD</b> berdampak langsung pada pergerakan Emas &amp; Dolar AS.</i>"
+        "<i>💡 Berita bertanda <b>FOKUS EMAS</b> paling berpengaruh pada naik-turunnya harga XAUUSD.</i>"
     )
 
     body_blocks = []
@@ -1350,7 +1389,7 @@ def format_news_data(data):
         )
         time_wib = html.escape(format_wib_time(raw_time))
 
-        tag = "🥇 <b>FOKUS XAUUSD</b>" if is_xau else "🇺🇸 <b>MARKET US</b>"
+        tag = "🥇 <b>FOKUS EMAS</b>" if is_xau else "🇺🇸 <b>BERITA US</b>"
         summary_line = f"{summary_id}\n" if summary_id else ""
 
         block = (
