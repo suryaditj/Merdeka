@@ -7,27 +7,27 @@
 import sys
 import html
 import asyncio
+from datetime import datetime, timedelta
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 from config import (
     BOT_TOKEN, GEMINI_API_KEY, GITHUB_TOKEN, GITHUB_REPOSITORY,
-    MARKETS, TIMEFRAMES, log, format_price, today_wib_date, parse_date_ymd
+    MARKETS, TIMEFRAMES, WIB, log, format_price, today_wib_date, parse_date_ymd
 )
 from smc_engine import (
-    analyze_market, create_report, analyze_confluence_pro, get_latest_price
+    analyze_market, create_report, analyze_confluence_pro,
+    get_latest_price, check_triple_tf_signal, format_auto_signal_alert
 )
 from fundamental_ai import get_cached_calendar, get_cached_news
 from user_manager import (
-    USERS_DB, load_users_db, sync_users, is_admin, get_active_vip_ids,
+    USERS_DB, load_users_db, sync_users, is_admin, is_free_mode, toggle_free_mode,
     check_user_access, consume_trial_if_needed, set_user_risk_profile,
     get_user_risk_profile, add_price_alert, get_user_alerts,
-    clear_user_alerts, build_locked_message_and_markup
+    clear_user_alerts, build_locked_message_and_markup,
+    get_user_signal_sub, set_user_signal_sub, get_signal_subscribers_for
 )
-
-from datetime import datetime, timedelta
-from config import WIB
 
 LAST_BROADCAST_SIGNALS = {}
 
@@ -43,10 +43,13 @@ def main_menu():
             InlineKeyboardButton("₿ BTCUSD", callback_data="market_BTCUSD")
         ],
         [
-            InlineKeyboardButton("⚡ Confluence XAU (H4+H1+M15)", callback_data="conf_XAUUSD")
+            InlineKeyboardButton("⚡ Confluence XAU (H4+H1+M15+M5)", callback_data="conf_XAUUSD")
         ],
         [
-            InlineKeyboardButton("⚡ Confluence BTC (H4+H1+M15)", callback_data="conf_BTCUSD")
+            InlineKeyboardButton("⚡ Confluence BTC (H4+H1+M15+M5)", callback_data="conf_BTCUSD")
+        ],
+        [
+            InlineKeyboardButton("🔔 Sinyal Otomatis (H1+M15+M5)", callback_data="sig_menu")
         ],
         [
             InlineKeyboardButton("📅 Kalender Ekonomi US", callback_data="calendar"),
@@ -72,7 +75,7 @@ def timeframe_menu(symbol):
         keyboard.append(row)
 
     keyboard.append([
-        InlineKeyboardButton(f"⚡ Confluence Pro {symbol} (H4+H1+M15)", callback_data=f"conf_{symbol}")
+        InlineKeyboardButton(f"⚡ Confluence Pro {symbol} (4 TF)", callback_data=f"conf_{symbol}")
     ])
     keyboard.append([
         InlineKeyboardButton("⬅️ Menu Utama", callback_data="menu")
@@ -83,7 +86,7 @@ def timeframe_menu(symbol):
 def analysis_menu(symbol, timeframe):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔍 ANALISA SEKARANG", callback_data=f"analyze_{symbol}_{timeframe}")],
-        [InlineKeyboardButton(f"⚡ Confluence Pro {symbol}", callback_data=f"conf_{symbol}")],
+        [InlineKeyboardButton(f"⚡ Confluence Pro {symbol} (4 TF)", callback_data=f"conf_{symbol}")],
         [
             InlineKeyboardButton("⬅️ Ganti TF", callback_data=f"market_{symbol}"),
             InlineKeyboardButton("🏠 Menu Utama", callback_data="menu")
@@ -93,12 +96,87 @@ def analysis_menu(symbol, timeframe):
 
 def confluence_menu(symbol):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 Refresh Confluence", callback_data=f"conf_{symbol}")],
+        [InlineKeyboardButton("🔄 Refresh Confluence (4 TF)", callback_data=f"conf_{symbol}")],
         [
             InlineKeyboardButton(f"📊 Pilih TF {symbol}", callback_data=f"market_{symbol}"),
             InlineKeyboardButton("🏠 Menu Utama", callback_data="menu")
         ]
     ])
+
+
+def signal_settings_menu(current_sub):
+    def mark(code, label):
+        return f"✅ {label}" if current_sub == code else label
+
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(mark("ALL", "Aktifkan XAUUSD & BTCUSD"), callback_data="sig_set_ALL")],
+        [
+            InlineKeyboardButton(mark("XAUUSD", "Khusus XAUUSD"), callback_data="sig_set_XAUUSD"),
+            InlineKeyboardButton(mark("BTCUSD", "Khusus BTCUSD"), callback_data="sig_set_BTCUSD")
+        ],
+        [InlineKeyboardButton(mark("OFF", "Matikan Notifikasi Otomatis"), callback_data="sig_set_OFF")],
+        [InlineKeyboardButton("🏠 Kembali ke Menu Utama", callback_data="menu")]
+    ])
+
+
+def build_signal_settings_text(user_id):
+    sub = get_user_signal_sub(user_id)
+    status_label = {
+        "ALL": "🟢 AKTIF (XAUUSD & BTCUSD)",
+        "XAUUSD": "🟢 AKTIF (Khusus XAUUSD)",
+        "BTCUSD": "🟢 AKTIF (Khusus BTCUSD)",
+        "OFF": "⚪ NONAKTIF (Belum diaktifkan)"
+    }.get(sub, "⚪ NONAKTIF")
+
+    return (
+        "🔔 <b>PENGATURAN SINYAL OTOMATIS (3-TF)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"Status Kamu Saat Ini: <b>{status_label}</b>\n\n"
+        "<b>Cara Kerja Sinyal Otomatis:</b>\n"
+        "Bot memindai pasar setiap <b>10 menit</b> di 3 timeframe scalping sekaligus: <b>H1 + M15 + M5</b>.\n\n"
+        "Notifikasi sinyal hanya dikirim ke chat kamu apabila:\n"
+        "✅ <b>H1, M15, dan M5 kompak searah</b> (semua BUY atau semua SELL).\n"
+        "✅ Konfirmasi SMC kuat (minimal 4 dari 7 metode valid).\n\n"
+        "<i>Pilih market yang ingin kamu pantau lewat tombol di bawah ini:</i>"
+    )
+
+
+def admin_panel_menu():
+    mode_label = "🔓 Mode Akses: GRATIS SEMUA (Klik untuk Kunci VIP)" if is_free_mode() else "🔒 Mode Akses: KHUSUS VIP (Klik untuk Buka Gratis)"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(mode_label, callback_data="admin_toggle_free")],
+        [InlineKeyboardButton("🔄 Refresh Panel Admin", callback_data="admin_refresh")],
+        [InlineKeyboardButton("🏠 Menu Utama", callback_data="menu")]
+    ])
+
+
+def build_admin_panel_text():
+    today = today_wib_date()
+    aktif = sum(
+        1 for m in USERS_DB["members"].values()
+        if parse_date_ymd(m.get("expired", "")) and today <= parse_date_ymd(m.get("expired", ""))
+    )
+    expired = len(USERS_DB["members"]) - aktif
+    contact_disp = f"@{USERS_DB['admin_username']}" if USERS_DB["admin_username"] else "(Belum diatur)"
+    mode_str = "🟢 GRATIS SEMUA (Semua fitur terbuka bebas)" if is_free_mode() else f"🔒 KHUSUS VIP (Trial gratis: {USERS_DB['trial_limit']}x)"
+    sub_count = len(USERS_DB["signal_subs"])
+
+    return (
+        "👑 <b>PANEL ADMIN BOT SMC</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"• Status Akses Bot: <b>{mode_str}</b>\n"
+        f"• Member VIP Aktif: <b>{aktif}</b> | Expired: <b>{expired}</b>\n"
+        f"• Pelanggan Sinyal Otomatis: <b>{sub_count} user</b>\n"
+        f"• Kontak Admin: <b>{html.escape(contact_disp)}</b>\n\n"
+        "📋 <b>PERINTAH KELOLA MEMBER:</b>\n"
+        "• <code>/add ID HARI NAMA</code> — Tambah member VIP\n"
+        "• <code>/perpanjang ID HARI</code> — Tambah masa aktif\n"
+        "• <code>/cekuser ID</code> — Cek detail user\n"
+        "• <code>/hapus ID</code> — Hapus member\n"
+        "• <code>/listuser</code> — Daftar semua member\n"
+        "• <code>/settrial JUMLAH</code> — Atur jatah trial saat Mode VIP aktif\n"
+        "• <code>/setcontact USERNAME</code> — Atur kontak tombol aktivasi"
+    )
 
 
 def info_menu(refresh_action):
@@ -110,51 +188,51 @@ def info_menu(refresh_action):
     ])
 
 
-def help_menu(is_user_admin=False):
-    buttons = [
+def help_menu():
+    return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("🥇 Analisa XAUUSD", callback_data="market_XAUUSD"),
             InlineKeyboardButton("₿ Analisa BTCUSD", callback_data="market_BTCUSD")
         ],
+        [InlineKeyboardButton("🔔 Atur Sinyal Otomatis", callback_data="sig_menu")],
         [InlineKeyboardButton("🏠 Kembali ke Menu Utama", callback_data="menu")]
-    ]
-    return InlineKeyboardMarkup(buttons)
+    ])
 
 
 def build_help_text(user_id):
     text = (
         "📖 <b>PANDUAN &amp; DAFTAR PERINTAH BOT</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "<b>1️⃣ PERINTAH MEMBER &amp; TRADING:</b>\n\n"
+        "<b>1️⃣ PERINTAH UTAMA:</b>\n"
         "• <code>/start</code> — Membuka menu utama bot.\n"
         "• <code>/menu</code> — Menampilkan tombol pilihan market &amp; berita.\n"
-        "• <code>/status</code> — Cek sisa masa aktif VIP &amp; profil risiko kamu.\n"
-        "• <code>/panduan</code> — Menampilkan halaman panduan ini.\n\n"
-        "💼 <b>Kalkulator Lot Otomatis:</b>\n"
+        "• <code>/status</code> — Cek status akses, langganan sinyal &amp; profil risiko.\n"
+        "• <code>/panduan</code> — Membuka halaman panduan ini.\n\n"
+        "<b>2️⃣ FITUR ANALISA &amp; SINYAL OTOMATIS:</b>\n"
+        "• <b>Confluence Pro (4 TF):</b> Menggabungkan analisa <b>H4 + H1 + M15 + M5</b> sekaligus dalam satu laporan.\n"
+        "• <b>Sinyal Otomatis (H1+M15+M5):</b> Aktifkan lewat tombol di menu utama agar bot mengirim sinyal otomatis saat H1, M15, dan M5 kompak searah.\n\n"
+        "<b>3️⃣ KALKULATOR LOT OTOMATIS:</b>\n"
         "• <code>/setrisk 500 1</code>\n"
-        "  <i>Mengatur modal $500 dengan batas risiko 1% per entry. Setiap laporan analisa akan otomatis menghitung ukuran Lot yang aman.</i>\n\n"
-        "🔔 <b>Alert Harga Pribadi (Watchlist):</b>\n"
+        "  <i>Mengatur modal $500 dengan risiko 1% per entry. Setiap laporan analisa otomatis menghitung ukuran Lot yang aman.</i>\n\n"
+        "<b>4️⃣ ALERT HARGA PRIBADI (WATCHLIST):</b>\n"
         "• <code>/alert XAUUSD 2650.50</code>\n"
-        "  <i>Memasang pengingat otomatis saat harga XAUUSD menyentuh 2650.50 (bisa untuk XAUUSD / BTCUSD).</i>\n"
-        "• <code>/myalert</code> — Melihat daftar alert harga yang sedang aktif.\n"
-        "• <code>/delalert</code> — Menghapus semua alert harga milikmu.\n\n"
-        "⚡ <b>Fitur Otomatis VIP:</b>\n"
-        "• <b>Confluence Pro:</b> Menggabungkan analisa H4 + H1 + M15 dalam sekali klik.\n"
-        "• <b>Auto-Scanner Sinyal A+:</b> Bot memindai H1 &amp; M15 tiap 15 menit dan otomatis mengirim notifikasi ke Member VIP jika muncul setup minimal 5/7 konfirmasi."
+        "  <i>Pengingat otomatis saat harga menyentuh level target (bisa untuk XAUUSD / BTCUSD).</i>\n"
+        "• <code>/myalert</code> — Lihat daftar alert harga aktif.\n"
+        "• <code>/delalert</code> — Hapus semua alert harga milikmu."
     )
 
     if is_admin(user_id):
         text += (
             "\n\n━━━━━━━━━━━━━━━━━━━━\n"
             "👑 <b>PERINTAH KHUSUS ADMIN:</b>\n"
-            "• <code>/admin</code> — Panel statistik member.\n"
+            "• <code>/admin</code> — Panel kontrol mode Gratis/VIP &amp; statistik.\n"
             "• <code>/add ID HARI NAMA</code> — Tambah member VIP.\n"
             "• <code>/perpanjang ID HARI</code> — Tambah masa aktif.\n"
             "• <code>/hapus ID</code> — Hapus member.\n"
             "• <code>/cekuser ID</code> — Cek detail user.\n"
             "• <code>/listuser</code> — Daftar semua member.\n"
-            "• <code>/settrial JUMLAH</code> — Atur jatah trial gratis.\n"
-            "• <code>/setcontact USERNAME</code> — Atur kontak tombol aktivasi."
+            "• <code>/settrial JUMLAH</code> — Atur jatah trial.\n"
+            "• <code>/setcontact USERNAME</code> — Atur username kontak admin."
         )
     return text
 
@@ -181,14 +259,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_html(text, reply_markup=markup)
         return
 
-    admin_hint = "\n👑 Ketik /admin untuk kelola member." if role == "ADMIN" else ""
+    admin_hint = "\n👑 Ketik /admin untuk buka panel kontrol & pengaturan mode Gratis/VIP." if role == "ADMIN" else ""
     await update.message.reply_html(
         "🤖 <b>MASTER SMC SCALPING BOT PRO</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"🆔 ID Kamu: <code>{user.id}</code>\n"
         f"📌 Status: <b>{html.escape(status_info)}</b>\n\n"
         "• <b>7 Metode Murni SMC:</b> OB Valid, FVG, BOS, SNR, SBR/RBS, SND, RBR/DBD\n"
-        "• <b>Fitur Pro:</b> Multi-TF Confluence, Radar Killzone &amp; Sweep, Kalkulator Lot, Alert Harga, &amp; AI Fundamental"
+        "• <b>Multi-TF Confluence:</b> H4 + H1 + M15 + M5\n"
+        "• <b>Sinyal Otomatis 3-TF:</b> Notifikasi otomatis saat H1 + M15 + M5 searah"
         f"{admin_hint}",
         reply_markup=main_menu()
     )
@@ -208,7 +287,7 @@ async def panduan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await update.message.reply_html(
         build_help_text(user.id),
-        reply_markup=help_menu(is_admin(user.id))
+        reply_markup=help_menu()
     )
 
 
@@ -217,6 +296,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _, _, user_status = check_user_access(user.id)
     risk = get_user_risk_profile(user.id)
     risk_str = f"Modal ${risk['balance']:,.0f} | Risk {risk['risk_pct']:.1f}%" if risk else "Belum diatur (/setrisk)"
+    sig_sub = get_user_signal_sub(user.id)
 
     ai_status = f"Aktif (...{GEMINI_API_KEY[-4:]})" if GEMINI_API_KEY else "Tidak Terdeteksi"
     gh_status = "Aktif (Auto-Commit)" if (GITHUB_TOKEN and GITHUB_REPOSITORY) else "Lokal Saja"
@@ -226,8 +306,9 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"🆔 ID Kamu: <code>{user.id}</code>\n"
         f"👤 Akses: <b>{html.escape(user_status)}</b>\n"
+        f"🔔 Sinyal Otomatis (3-TF): <b>{sig_sub}</b>\n"
         f"💼 Profil Lot: <b>{risk_str}</b>\n"
-        f"🔔 Alert Aktif: <b>{len(get_user_alerts(user.id))}/5</b>\n"
+        f"⏰ Alert Harga Aktif: <b>{len(get_user_alerts(user.id))}/5</b>\n"
         f"🤖 Gemini AI: <b>{ai_status}</b>\n"
         f"☁️ Sync GitHub: <b>{gh_status}</b>"
     )
@@ -365,7 +446,7 @@ async def claim_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👑 <b>ADMIN BERHASIL DIKLAIM!</b>\n"
         f"ID Admin: <code>{user.id}</code>\n"
         f"Status Simpan: <i>{html.escape(sync_msg)}</i>\n\n"
-        "Ketik /admin untuk melihat panel kelola member.",
+        "Ketik /admin untuk membuka panel kontrol.",
         reply_markup=main_menu()
     )
 
@@ -375,28 +456,9 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Perintah ini khusus Admin.")
         return
 
-    today = today_wib_date()
-    aktif = sum(
-        1 for m in USERS_DB["members"].values()
-        if parse_date_ymd(m.get("expired", "")) and today <= parse_date_ymd(m.get("expired", ""))
-    )
-    expired = len(USERS_DB["members"]) - aktif
-    contact_disp = f"@{USERS_DB['admin_username']}" if USERS_DB["admin_username"] else "(Belum diatur)"
-
     await update.message.reply_html(
-        "👑 <b>PANEL ADMIN BOT SMC</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        f"• Member VIP Aktif: <b>{aktif}</b> | Expired: <b>{expired}</b>\n"
-        f"• Jatah Trial User Baru: <b>{USERS_DB['trial_limit']}x</b>\n"
-        f"• Kontak Admin: <b>{html.escape(contact_disp)}</b>\n\n"
-        "📋 <b>PERINTAH KELOLA MEMBER:</b>\n"
-        "• <code>/add ID HARI NAMA</code>\n"
-        "• <code>/perpanjang ID HARI</code>\n"
-        "• <code>/cekuser ID</code>\n"
-        "• <code>/hapus ID</code>\n"
-        "• <code>/listuser</code>\n"
-        "• <code>/settrial JUMLAH</code>\n"
-        "• <code>/setcontact USERNAME</code>"
+        build_admin_panel_text(),
+        reply_markup=admin_panel_menu()
     )
 
 
@@ -588,18 +650,44 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
 
+    # Admin Toggle Mode Gratis / VIP
+    if data == "admin_toggle_free":
+        if not is_admin(user.id):
+            return
+        await asyncio.to_thread(toggle_free_mode)
+        await query.message.edit_text(
+            build_admin_panel_text(),
+            parse_mode="HTML",
+            reply_markup=admin_panel_menu()
+        )
+        return
+
+    if data == "admin_refresh":
+        if not is_admin(user.id):
+            return
+        await query.message.edit_text(
+            build_admin_panel_text(),
+            parse_mode="HTML",
+            reply_markup=admin_panel_menu()
+        )
+        return
+
     if data == "help_commands":
         await query.message.reply_html(
             build_help_text(user.id),
-            reply_markup=help_menu(is_admin(user.id))
+            reply_markup=help_menu()
         )
         return
 
     if data == "check_my_status":
         allowed, _, status_info = check_user_access(user.id)
         if allowed:
+            sub_status = get_user_signal_sub(user.id)
             await query.message.reply_html(
-                f"✅ <b>AKSES AKTIF</b>\n🆔 ID Kamu: <code>{user.id}</code>\n📌 Status: <b>{html.escape(status_info)}</b>",
+                f"✅ <b>AKSES AKTIF</b>\n"
+                f"🆔 ID Kamu: <code>{user.id}</code>\n"
+                f"📌 Status: <b>{html.escape(status_info)}</b>\n"
+                f"🔔 Sinyal Otomatis (3-TF): <b>{sub_status}</b>",
                 reply_markup=main_menu()
             )
         else:
@@ -616,12 +704,42 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("Pilih market:", reply_markup=main_menu())
         return
 
+    # Pengaturan Sinyal Otomatis 3-TF (H1 + M15 + M5)
+    if data == "sig_menu":
+        allowed, _, _ = check_user_access(user.id)
+        if not allowed:
+            text, markup = build_locked_message_and_markup(user)
+            await query.message.reply_html(text, reply_markup=markup)
+            return
+        cur_sub = get_user_signal_sub(user.id)
+        await query.message.reply_html(
+            build_signal_settings_text(user.id),
+            reply_markup=signal_settings_menu(cur_sub)
+        )
+        return
+
+    if data.startswith("sig_set_"):
+        allowed, _, _ = check_user_access(user.id)
+        if not allowed:
+            text, markup = build_locked_message_and_markup(user)
+            await query.message.reply_html(text, reply_markup=markup)
+            return
+        mode = data.replace("sig_set_", "")
+        await asyncio.to_thread(set_user_signal_sub, user.id, mode)
+        cur_sub = get_user_signal_sub(user.id)
+        await query.message.edit_text(
+            build_signal_settings_text(user.id),
+            parse_mode="HTML",
+            reply_markup=signal_settings_menu(cur_sub)
+        )
+        return
+
     if data.startswith("market_"):
         symbol = data.replace("market_", "")
         if symbol not in MARKETS:
             return
         await query.message.reply_text(
-            f"Market: {symbol}\nPilih timeframe atau jalankan Confluence Pro:",
+            f"Market: {symbol}\nPilih timeframe atau jalankan Confluence Pro (4 TF):",
             reply_markup=timeframe_menu(symbol)
         )
         return
@@ -648,7 +766,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         processing = await query.message.reply_text(
-            f"⚡ Menjalankan Confluence Pro {symbol} (H4 + H1 + M15)..."
+            f"⚡ Menjalankan Confluence Pro {symbol} (H4 + H1 + M15 + M5)..."
         )
         try:
             risk_profile = get_user_risk_profile(user.id)
@@ -727,7 +845,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# BACKGROUND WORKERS (WATCHLIST ALERT + AUTO-SCANNER SINYAL A+)
+# BACKGROUND WORKERS (PRICE ALERT + AUTO-SCANNER 3-TF H1+M15+M5)
 # ============================================================
 
 async def background_scanner_and_alerts(application):
@@ -767,11 +885,11 @@ async def background_scanner_and_alerts(application):
                                     f"━━━━━━━━━━━━━━━━━━━━\n"
                                     f"• Target Alert: <b>{format_price(target)}</b>\n"
                                     f"• Harga Saat Ini: <b>{format_price(cur)}</b>\n\n"
-                                    f"Tekan tombol di bawah untuk langsung analisa zona ini:"
+                                    f"Tekan tombol di bawah untuk langsung analisa 4 TF:"
                                 ),
                                 parse_mode="HTML",
                                 reply_markup=InlineKeyboardMarkup([
-                                    [InlineKeyboardButton(f"⚡ Confluence Pro {sym}", callback_data=f"conf_{sym}")]
+                                    [InlineKeyboardButton(f"⚡ Confluence Pro {sym} (4 TF)", callback_data=f"conf_{sym}")]
                                 ])
                             )
                         except Exception:
@@ -783,33 +901,35 @@ async def background_scanner_and_alerts(application):
                     ]
                     await asyncio.to_thread(sync_users)
 
-            # 2. Auto-Scanner Sinyal A+ (Minimal 5/7 Konfirmasi) setiap 15 menit
-            if tick % 15 == 0:
-                vip_ids = get_active_vip_ids()
-                if vip_ids:
-                    for sym in MARKETS:
-                        for tf in ("H1", "M15"):
-                            try:
-                                res = await asyncio.to_thread(analyze_market, sym, tf)
-                                if res["direction"] in ("BUY", "SELL") and res["confirmations"] >= 5:
-                                    sig_key = f"{sym}_{tf}_{res['direction']}_{round(res['entry_low'], 1)}"
-                                    if LAST_BROADCAST_SIGNALS.get(f"{sym}_{tf}") != sig_key:
-                                        LAST_BROADCAST_SIGNALS[f"{sym}_{tf}"] = sig_key
-                                        alert_msg = create_report(
-                                            res,
-                                            title_prefix=f"🚨 AUTO-SCANNER SINYAL A+ ({sym} {tf})"
+            # 2. Auto-Scanner 3-TF (H1 + M15 + M5) setiap 10 menit
+            if tick % 10 == 0:
+                for sym in MARKETS:
+                    recipients = get_signal_subscribers_for(sym)
+                    if not recipients:
+                        continue
+                    try:
+                        bundle = await asyncio.to_thread(check_triple_tf_signal, sym)
+                        if bundle:
+                            m5_res = bundle["m5"]
+                            sig_key = f"{sym}_{bundle['direction']}_{round(m5_res['entry_low'], 1)}"
+                            if LAST_BROADCAST_SIGNALS.get(sym) != sig_key:
+                                LAST_BROADCAST_SIGNALS[sym] = sig_key
+                                for uid in recipients:
+                                    try:
+                                        risk_prof = get_user_risk_profile(uid)
+                                        msg_text = format_auto_signal_alert(bundle, risk_profile=risk_prof)
+                                        await application.bot.send_message(
+                                            chat_id=uid,
+                                            text=msg_text,
+                                            reply_markup=InlineKeyboardMarkup([
+                                                [InlineKeyboardButton(f"⚡ Cek Confluence 4-TF {sym}", callback_data=f"conf_{sym}")],
+                                                [InlineKeyboardButton("🔔 Atur Notifikasi Sinyal", callback_data="sig_menu")]
+                                            ])
                                         )
-                                        for uid in vip_ids:
-                                            try:
-                                                await application.bot.send_message(
-                                                    chat_id=uid,
-                                                    text=alert_msg,
-                                                    reply_markup=analysis_menu(sym, tf)
-                                                )
-                                            except Exception:
-                                                pass
-                            except Exception as scan_err:
-                                log.warning("Scanner %s %s error: %s", sym, tf, scan_err)
+                                    except Exception:
+                                        pass
+                    except Exception as scan_err:
+                        log.warning("Auto-Scanner 3-TF %s error: %s", sym, scan_err)
 
         except Exception as loop_err:
             log.error("Background loop error: %s", loop_err)
@@ -829,8 +949,7 @@ async def error_handler(update, context):
 async def post_init(application):
     log.info("======================================")
     log.info("MASTER SMC SCALPING BOT PRO STARTED")
-    log.info("Modules: config, smc_engine, fundamental_ai, user_manager, main")
-    log.info("Admin IDs: %s | VIP Members: %s", USERS_DB["admin_ids"], len(USERS_DB["members"]))
+    log.info("Free Mode: %s | Admin IDs: %s", is_free_mode(), USERS_DB["admin_ids"])
     log.info("======================================")
     asyncio.create_task(background_scanner_and_alerts(application))
 
