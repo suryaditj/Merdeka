@@ -1,3 +1,4 @@
+
 name: MASTER SMC SCALPING BOT
 
 on:
@@ -38,12 +39,12 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: |
           set +e
-timeout --signal=INT --kill-after=30s 21000s python -u main.py
-STATUS=$?
+          timeout --signal=INT --kill-after=30s 21000s python -u main.py
+          STATUS=$?
 
-if [ "$STATUS" -eq 124 ] || [ "$STATUS" -eq 130 ]; then
-  echo "Bot selesai sesuai jadwal."
-  exit 0
-fi
+          if [ "$STATUS" -eq 124 ] || [ "$STATUS" -eq 130 ]; then
+            echo "Bot selesai sesuai jadwal."
+            exit 0
+          fi
 
-exit "$STATUS"
+          exit "$STATUS"
