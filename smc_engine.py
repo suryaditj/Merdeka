@@ -177,6 +177,24 @@ def get_session_killzone_info(symbol):
     )
 
 
+def get_short_session_badge(symbol):
+    now_wib = datetime.now(WIB)
+    t = now_wib.hour * 60 + now_wib.minute
+    if 20 * 60 + 15 <= t <= 22 * 60 + 30:
+        return "🚨 NY Open"
+    if t >= 22 * 60 + 31 or t < 4 * 60:
+        return "🇺🇸 NY Session"
+    if 14 * 60 + 45 <= t <= 16 * 60 + 30:
+        return "⚠️ London Open"
+    if 16 * 60 + 31 <= t <= 20 * 60 + 14:
+        return "⚡ London Session"
+    if 8 * 60 + 45 <= t <= 14 * 60 + 44:
+        return "🌏 Asia Session"
+    if symbol == "BTCUSD":
+        return "🌐 Crypto 24/7"
+    return "🇦🇺 Sydney / Pre-Asia"
+
+
 def detect_liquidity_sweep(candles):
     if len(candles) < 35:
         return "NEUTRAL", "Belum ada sapuan likuiditas"
@@ -788,7 +806,6 @@ def _format_pending_limits_section(result, risk_profile=None):
 def create_report(result, risk_profile=None, title_prefix="📊 ANALISA SMC SCALPING PRO"):
     direction = result["direction"]
     emoji = {"BUY": "🟢", "SELL": "🔴", "WAIT": "⚪"}.get(direction, "⚪")
-    arrow = {"BUY": "⬆️", "SELL": "⬇️", "WAIT": "⏸️"}.get(direction, "")
 
     ob_sig = result["signals"]["OB"]
     ob_text = (
@@ -837,7 +854,7 @@ def create_report(result, risk_profile=None, title_prefix="📊 ANALISA SMC SCAL
         f"Sesi: {result['session_info']}",
         f"Likuiditas: {result['sweep_desc']}",
         "",
-        f"{emoji} HASIL SINYAL: {direction} {arrow}",
+        f"{emoji} ARAH INSTAN: {direction}",
         f"Status: {result['status']} ({result['confirmations']}/{result['total_indicators']} Konfirmasi)"
     ]
 
@@ -893,7 +910,7 @@ def create_report(result, risk_profile=None, title_prefix="📊 ANALISA SMC SCAL
 
 
 # ============================================================
-# MULTI-TIMEFRAME CONFLUENCE PRO (VOTING MAYORITAS 6 TF)
+# MULTI-TIMEFRAME CONFLUENCE PRO (6 TF — RINGKAS & MAYORITAS)
 # ============================================================
 
 def analyze_confluence_pro(symbol, risk_profile=None):
@@ -908,42 +925,32 @@ def analyze_confluence_pro(symbol, risk_profile=None):
     dirs = [r["direction"] for r in all_res]
     buy_tf = dirs.count("BUY")
     sell_tf = dirs.count("SELL")
-    wait_tf = dirs.count("WAIT")
 
-    if sell_tf >= 3 and sell_tf > buy_tf:
+    def icon(r):
+        return {"BUY": "🟢", "SELL": "🔴", "WAIT": "⚪"}.get(r["direction"], "⚪")
+
+    matriks_str = (
+        f"H4 {icon(res_h4)} | H1 {icon(res_h1)} | M30 {icon(res_m30)} | "
+        f"M15 {icon(res_m15)} | M5 {icon(res_m5)} | M1 {icon(res_m1)}"
+    )
+
+    if sell_tf > buy_tf:
         majority_dir = "SELL"
-        verdict = f"🔴 HASIL SINYAL: SELL ⬇️ ({sell_tf}/6 TF Dominan SELL)"
-    elif buy_tf >= 3 and buy_tf > sell_tf:
+        verdict = f"🔴 SELL ⬇️ (Unggul {sell_tf}-{buy_tf})"
+    elif buy_tf > sell_tf:
         majority_dir = "BUY"
-        verdict = f"🟢 HASIL SINYAL: BUY ⬆️ ({buy_tf}/6 TF Dominan BUY)"
+        verdict = f"🟢 BUY ⬆️ (Unggul {buy_tf}-{sell_tf})"
     else:
         majority_dir = "WAIT"
-        verdict = f"⚪ HASIL SINYAL: WAIT ⏸️ (BUY: {buy_tf} | SELL: {sell_tf} | WAIT: {wait_tf})"
-
-    def badge(r):
-        ic = {"BUY": "🟢", "SELL": "🔴", "WAIT": "⚪"}.get(r["direction"], "⚪")
-        ar = {"BUY": "⬆️", "SELL": "⬇️", "WAIT": "⏸️"}.get(r["direction"], "")
-        if r["direction"] == "WAIT" and r.get("bias") in ("BUY", "SELL"):
-            return f"{ic} WAIT {ar} (condong {r['bias']} {r['confirmations']}/7)"
-        return f"{ic} {r['direction']} {ar} ({r['confirmations']}/7)"
+        verdict = f"⚪ WAIT ⏸️ (Imbang {buy_tf}-{sell_tf})"
 
     lines = [
-        f"⚡ ANALISA CONFLUENCE PRO — {symbol}",
+        f"⚡ CONFLUENCE 6-TF — {symbol}",
         "━━━━━━━━━━━━━━━━━━",
-        f"Harga Saat Ini: {format_price(res_m1['price'])}",
-        f"Sesi: {res_m1['session_info']}",
-        f"Likuiditas M5: {res_m5['sweep_desc']}",
+        f"💰 Harga: {format_price(res_m1['price'])} | {get_short_session_badge(symbol)}",
+        f"🧭 Matriks: {matriks_str}",
         "",
-        "🧭 MATRIKS 6 TIMEFRAME (H4 • H1 • M30 • M15 • M5 • M1)",
-        f"• H4  (Tren Besar): {badge(res_h4)}",
-        f"• H1  (Struktur Intraday): {badge(res_h1)}",
-        f"• M30 (Transisi Sesi): {badge(res_m30)}",
-        f"• M15 (Zona Setup): {badge(res_m15)}",
-        f"• M5  (Konfirmasi Entry): {badge(res_m5)}",
-        f"• M1  (Mikro Trigger): {badge(res_m1)}",
-        "",
-        f"📊 REKAP VOTING: BUY ({buy_tf}) | SELL ({sell_tf}) | WAIT ({wait_tf})",
-        f"🏆 {verdict}"
+        f"🏆 HASIL SINYAL: {verdict}"
     ]
 
     exec_res = None
@@ -955,12 +962,12 @@ def analyze_confluence_pro(symbol, risk_profile=None):
                 break
 
     if exec_res is not None:
-        arrow = "⬆️" if majority_dir == "BUY" else "⬇️"
+        exec_badge = "🔴 SELL ⬇️" if majority_dir == "SELL" else "🟢 BUY ⬆️"
         lines.extend([
             "",
-            f"⚡ EKSEKUSI INSTAN ({majority_dir} {arrow} — Acuan {exec_res['timeframe']})",
+            f"⚡ EKSEKUSI INSTAN : {exec_badge}",
             f"• Entry: {format_price(exec_res['entry_low'])} - {format_price(exec_res['entry_high'])}",
-            f"• Stop Loss: {format_price(exec_res['sl'])}",
+            f"• SL: {format_price(exec_res['sl'])}",
             f"• TP1: {format_price(exec_res['tp1'])} | TP2: {format_price(exec_res['tp2'])} | TP3: {format_price(exec_res['tp3'])}"
         ])
 
@@ -973,17 +980,19 @@ def analyze_confluence_pro(symbol, risk_profile=None):
                 exec_res["sl"]
             )
             if lot_info:
-                lines.append(
-                    f"💼 Lot Instan (${lot_info['balance']:,.0f} | {lot_info['risk_pct']:.1f}%): "
-                    f"{_lot_text(lot_info)}"
-                )
+                lines.append(f"• 💼 Lot: {_lot_text(lot_info)}")
 
-    lines.extend(_format_pending_limits_section(res_m15, risk_profile))
+    sl_ord = res_m15["sell_limit"]
+    bl_ord = res_m15["buy_limit"]
+    limit_status = "✅ Aman Pasang Limit" if res_m15.get("limit_safe") else "⚠️ Waspada Buka Sesi"
 
     lines.extend([
         "",
-        "━━━━━━━━━━━━━━━━━━",
-        "Keputusan diambil dari suara terbanyak 6 timeframe (minimal 3/6 TF searah)."
+        "🎯 SETTING PENDING ORDER",
+        f"• Status: {limit_status}",
+        f"• 🔴 SELL LIMIT: {format_price(sl_ord['entry'])} (SL {format_price(sl_ord['sl'])} | TP {format_price(sl_ord['tp1'])})",
+        f"• 🟢 BUY LIMIT: {format_price(bl_ord['entry'])} (SL {format_price(bl_ord['sl'])} | TP {format_price(bl_ord['tp1'])})",
+        "━━━━━━━━━━━━━━━━━━"
     ])
 
     return "\n".join(lines)
@@ -1022,12 +1031,11 @@ def format_auto_signal_alert(sig_bundle, risk_profile=None):
     r_m5 = sig_bundle["m5"]
 
     emoji = "🟢" if direction == "BUY" else "🔴"
-    arrow = "⬆️" if direction == "BUY" else "⬇️"
 
     lines = [
         f"🚨 SINYAL OTOMATIS 3-TF (H1 + M15 + M5) — {sym}",
         "━━━━━━━━━━━━━━━━━━",
-        f"{emoji} HASIL SINYAL: {direction} {arrow} (3/3 TIMEFRAME SEARAH)",
+        f"{emoji} ARAH KOMPAK: {direction} (3/3 TIMEFRAME SEARAH)",
         f"Harga: {format_price(r_m5['price'])}",
         f"Sesi: {r_m5['session_info']}",
         "",
