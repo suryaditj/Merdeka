@@ -5,7 +5,7 @@
 # TELEGRAM + BIQUOTE + GITHUB ACTIONS
 #
 # 100 CANDLE TERAKHIR YANG SUDAH TERTUTUP
-# FVG + SNR + SND + BOS
+# FVG + BOS + SNR + SBR/RBS + SND + RBR/DBD
 # MANUAL ANALYSIS ONLY
 #
 # TIMEFRAMES: M1 M5 M15 M30 H1 H4
@@ -84,7 +84,7 @@ log = logging.getLogger("SMC_BOT")
 SESSION = requests.Session()
 
 SESSION.headers.update({
-    "User-Agent": "Mozilla/5.0 SMC-Bot/2.0",
+    "User-Agent": "Mozilla/5.0 SMC-Bot/2.1",
     "Accept": "application/json"
 })
 
@@ -164,12 +164,12 @@ def translate_texts_to_id(texts):
     return clean_inputs
 
 
-def format_wib_time(value):
+def parse_event_dt_wib(value):
     """
-    Mengonversi timestamp/ISO string ke format waktu WIB yang rapi.
+    Mengubah string/timestamp waktu API menjadi objek datetime WIB.
     """
     if value is None or str(value).strip() == "":
-        return "Waktu belum tersedia"
+        return None
 
     raw_str = str(value).strip()
 
@@ -178,20 +178,30 @@ def format_wib_time(value):
             num = float(raw_str)
             if num > 100000000000:
                 num /= 1000.0
-            dt = datetime.fromtimestamp(num, tz=timezone.utc).astimezone(WIB)
-            bulan = BULAN_ID.get(dt.month, dt.strftime("%b"))
-            return f"{dt.day:02d} {bulan} {dt.year} | {dt.strftime('%H:%M')} WIB"
+            return datetime.fromtimestamp(num, tz=timezone.utc).astimezone(WIB)
 
         iso_str = raw_str[:-1] + "+00:00" if raw_str.endswith("Z") else raw_str
         dt = datetime.fromisoformat(iso_str)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        dt_wib = dt.astimezone(WIB)
+        return dt.astimezone(WIB)
+    except Exception:
+        return None
+
+
+def format_wib_time(value):
+    """
+    Mengonversi timestamp/ISO string ke format waktu WIB yang rapi.
+    """
+    dt_wib = parse_event_dt_wib(value)
+    if dt_wib is not None:
         bulan = BULAN_ID.get(dt_wib.month, dt_wib.strftime("%b"))
         return f"{dt_wib.day:02d} {bulan} {dt_wib.year} | {dt_wib.strftime('%H:%M')} WIB"
 
-    except Exception:
-        return raw_str
+    if value is None or str(value).strip() == "":
+        return "Waktu belum tersedia"
+
+    return str(value).strip()
 
 
 def parse_numeric_metric(val):
@@ -407,7 +417,7 @@ def get_candles(symbol, timeframe):
 
 
 # ============================================================
-# SMC: FVG
+# SMC: FVG (FAIR VALUE GAP)
 # ============================================================
 
 def detect_fvg(candles):
@@ -417,6 +427,7 @@ def detect_fvg(candles):
         first = candles[i - 2]
         third = candles[i]
 
+        # Bullish FVG
         if third["low"] > first["high"]:
 
             return (
@@ -425,6 +436,7 @@ def detect_fvg(candles):
                 third["low"]
             )
 
+        # Bearish FVG
         if third["high"] < first["low"]:
 
             return (
@@ -437,7 +449,7 @@ def detect_fvg(candles):
 
 
 # ============================================================
-# SMC: BOS
+# SMC: BOS (BREAK OF STRUCTURE)
 # ============================================================
 
 def detect_bos(candles):
@@ -458,7 +470,7 @@ def detect_bos(candles):
 
 
 # ============================================================
-# SMC: SUPPORT & RESISTANCE
+# SMC: SUPPORT & RESISTANCE (SNR)
 # ============================================================
 
 def detect_snr(candles):
@@ -487,7 +499,85 @@ def detect_snr(candles):
 
 
 # ============================================================
-# SMC: SUPPLY & DEMAND
+# SMC: SBR & RBS (SUPPORT BECOME RESISTANCE / RESISTANCE BECOME SUPPORT)
+# ============================================================
+
+def detect_sbr_rbs(candles):
+    """
+    Mendeteksi area Role Reversal (Flip Zone):
+    - RBS (BUY): Swing Resistance ditembus ke atas, lalu harga retest di area tersebut.
+    - SBR (SELL): Swing Support ditembus ke bawah, lalu harga retest di area tersebut.
+    """
+    recent = candles[-1]
+    price = recent["close"]
+
+    lookback = candles[-60:-1]
+    if len(lookback) < 10:
+        return "NEUTRAL", "-", None
+
+    avg_range = sum(c["high"] - c["low"] for c in lookback) / len(lookback)
+    if avg_range <= 0:
+        avg_range = price * 0.001
+
+    threshold = avg_range * 1.2
+
+    swing_highs = []
+    swing_lows = []
+
+    # Identifikasi Swing High & Swing Low menggunakan fraktal 2-candle kiri & kanan
+    for i in range(2, len(lookback) - 2):
+        h = lookback[i]["high"]
+        l = lookback[i]["low"]
+
+        if (
+            h >= lookback[i - 1]["high"]
+            and h >= lookback[i - 2]["high"]
+            and h > lookback[i + 1]["high"]
+            and h > lookback[i + 2]["high"]
+        ):
+            swing_highs.append((i, h))
+
+        if (
+            l <= lookback[i - 1]["low"]
+            and l <= lookback[i - 2]["low"]
+            and l < lookback[i + 1]["low"]
+            and l < lookback[i + 2]["low"]
+        ):
+            swing_lows.append((i, l))
+
+    # Cek RBS (Resistance ditembus ke atas -> jadi Support) dari yang terbaru
+    for idx, res_level in reversed(swing_highs):
+        broken_up = any(
+            lookback[k]["close"] > res_level
+            for k in range(idx + 2, len(lookback))
+        )
+        if broken_up:
+            # Harga sedang retest di sekitar bekas resistance dan bertahan di atas/dekat zona
+            if (
+                abs(price - res_level) <= threshold
+                and price >= res_level - (threshold * 0.5)
+            ):
+                return "BUY", "RBS", res_level
+
+    # Cek SBR (Support ditembus ke bawah -> jadi Resistance) dari yang terbaru
+    for idx, sup_level in reversed(swing_lows):
+        broken_down = any(
+            lookback[k]["close"] < sup_level
+            for k in range(idx + 2, len(lookback))
+        )
+        if broken_down:
+            # Harga sedang retest di sekitar bekas support dan tertahan di bawah/dekat zona
+            if (
+                abs(price - sup_level) <= threshold
+                and price <= sup_level + (threshold * 0.5)
+            ):
+                return "SELL", "SBR", sup_level
+
+    return "NEUTRAL", "-", None
+
+
+# ============================================================
+# SMC: SUPPLY & DEMAND (SND)
 # ============================================================
 
 def detect_snd(candles):
@@ -514,6 +604,7 @@ def detect_snd(candles):
             current["close"] - current["open"]
         )
 
+        # Bullish displacement
         if (
             current["close"] > current["open"]
             and body >= candle_range * 0.65
@@ -521,6 +612,7 @@ def detect_snd(candles):
         ):
             demand = current["low"]
 
+        # Bearish displacement
         if (
             current["close"] < current["open"]
             and body >= candle_range * 0.65
@@ -547,6 +639,95 @@ def detect_snd(candles):
 
 
 # ============================================================
+# SMC: RBR & DBD (RALLY-BASE-RALLY / DROP-BASE-DROP)
+# ============================================================
+
+def detect_rbr_dbd(candles):
+    """
+    Mendeteksi zona Supply & Demand Continuation:
+    - RBR (BUY): Rally (Impulsif Naik) -> Base (Konsolidasi) -> Rally (Breakout Naik)
+    - DBD (SELL): Drop (Impulsif Turun) -> Base (Konsolidasi) -> Drop (Breakdown Turun)
+    """
+    recent = candles[-1]
+    price = recent["close"]
+
+    lookback = candles[-50:-1]
+    if len(lookback) < 8:
+        return "NEUTRAL", "-", None, None
+
+    avg_range = sum(c["high"] - c["low"] for c in lookback) / len(lookback)
+    if avg_range <= 0:
+        avg_range = price * 0.001
+
+    buffer = avg_range * 0.65
+
+    def is_strong_bull(c):
+        rng = c["high"] - c["low"]
+        body = c["close"] - c["open"]
+        return rng > 0 and body > 0 and (body / rng) >= 0.55
+
+    def is_strong_bear(c):
+        rng = c["high"] - c["low"]
+        body = c["open"] - c["close"]
+        return rng > 0 and body > 0 and (body / rng) >= 0.55
+
+    def is_base_candle(c):
+        rng = c["high"] - c["low"]
+        if rng <= 0:
+            return True
+        body = abs(c["close"] - c["open"])
+        return (body / rng) <= 0.50
+
+    # Pindai dari pola paling baru ke lama
+    for i in range(len(lookback) - 4, -1, -1):
+        leg1 = lookback[i]
+
+        for base_len in (1, 2):
+            leg2_idx = i + base_len + 1
+            if leg2_idx >= len(lookback):
+                continue
+
+            base_candles = lookback[i + 1: leg2_idx]
+            leg2 = lookback[leg2_idx]
+
+            if not all(is_base_candle(bc) for bc in base_candles):
+                continue
+
+            zone_low = min(bc["low"] for bc in base_candles)
+            zone_high = max(bc["high"] for bc in base_candles)
+
+            # Cek pola RBR (Rally - Base - Rally) -> BUY
+            if (
+                is_strong_bull(leg1)
+                and is_strong_bull(leg2)
+                and leg2["close"] > zone_high
+            ):
+                # Pastikan zona belum ditembus turun secara valid setelah terbentuk
+                invalidated = any(
+                    lookback[k]["close"] < zone_low - buffer
+                    for k in range(leg2_idx + 1, len(lookback))
+                )
+                if not invalidated and (zone_low - buffer <= price <= zone_high + buffer):
+                    return "BUY", "RBR", zone_low, zone_high
+
+            # Cek pola DBD (Drop - Base - Drop) -> SELL
+            if (
+                is_strong_bear(leg1)
+                and is_strong_bear(leg2)
+                and leg2["close"] < zone_low
+            ):
+                # Pastikan zona belum ditembus naik secara valid setelah terbentuk
+                invalidated = any(
+                    lookback[k]["close"] > zone_high + buffer
+                    for k in range(leg2_idx + 1, len(lookback))
+                )
+                if not invalidated and (zone_low - buffer <= price <= zone_high + buffer):
+                    return "SELL", "DBD", zone_low, zone_high
+
+    return "NEUTRAL", "-", None, None
+
+
+# ============================================================
 # ANALYSIS ENGINE
 # ============================================================
 
@@ -560,13 +741,17 @@ def analyze_market(symbol, timeframe):
     fvg, fvg_low, fvg_high = detect_fvg(candles)
     bos = detect_bos(candles)
     snr, snr_level = detect_snr(candles)
+    sbr_rbs, sbr_rbs_type, sbr_rbs_level = detect_sbr_rbs(candles)
     snd, snd_level = detect_snd(candles)
+    rbr_dbd, rbr_dbd_type, rbr_dbd_low, rbr_dbd_high = detect_rbr_dbd(candles)
 
     signals = {
         "FVG": fvg,
+        "BOS": bos,
         "SNR": snr,
+        "SBR_RBS": sbr_rbs,
         "SND": snd,
-        "BOS": bos
+        "RBR_DBD": rbr_dbd
     }
 
     buy_votes = sum(
@@ -595,7 +780,7 @@ def analyze_market(symbol, timeframe):
     if direction == "WAIT" or confirmations < 3:
         status = "BELUM ADA SETUP KUAT"
 
-    elif confirmations == 3:
+    elif confirmations in (3, 4):
         status = "KUAT"
 
     else:
@@ -647,6 +832,7 @@ def analyze_market(symbol, timeframe):
         "price": price,
         "direction": direction,
         "confirmations": confirmations,
+        "total_indicators": len(signals),
         "status": status,
         "signals": signals,
         "entry_low": entry_low,
@@ -659,7 +845,12 @@ def analyze_market(symbol, timeframe):
         "fvg_low": fvg_low,
         "fvg_high": fvg_high,
         "snr_level": snr_level,
-        "snd_level": snd_level
+        "sbr_rbs_type": sbr_rbs_type,
+        "sbr_rbs_level": sbr_rbs_level,
+        "snd_level": snd_level,
+        "rbr_dbd_type": rbr_dbd_type,
+        "rbr_dbd_low": rbr_dbd_low,
+        "rbr_dbd_high": rbr_dbd_high
     }
 
 
@@ -691,8 +882,33 @@ def create_report(result):
         "WAIT": "⚪"
     }.get(direction, "⚪")
 
+    # Format label detail untuk SBR/RBS
+    sbr_rbs_sig = result["signals"]["SBR_RBS"]
+    if sbr_rbs_sig != "NEUTRAL" and result["sbr_rbs_level"] is not None:
+        sbr_rbs_text = (
+            f"{sbr_rbs_sig} ({result['sbr_rbs_type']} @ "
+            f"{format_price(result['sbr_rbs_level'])})"
+        )
+    else:
+        sbr_rbs_text = sbr_rbs_sig
+
+    # Format label detail untuk RBR/DBD
+    rbr_dbd_sig = result["signals"]["RBR_DBD"]
+    if (
+        rbr_dbd_sig != "NEUTRAL"
+        and result["rbr_dbd_low"] is not None
+        and result["rbr_dbd_high"] is not None
+    ):
+        rbr_dbd_text = (
+            f"{rbr_dbd_sig} ({result['rbr_dbd_type']} @ "
+            f"{format_price(result['rbr_dbd_low'])} - "
+            f"{format_price(result['rbr_dbd_high'])})"
+        )
+    else:
+        rbr_dbd_text = rbr_dbd_sig
+
     lines = [
-        "📊 ANALISA SMC SCALPING",
+        "📊 ANALISA SMC SCALPING PRO",
         "━━━━━━━━━━━━━━━━━━",
         f"Market: {result['symbol']}",
         f"Timeframe: {result['timeframe']}",
@@ -701,13 +917,15 @@ def create_report(result):
         "",
         f"{emoji} ARAH: {direction}",
         f"Status: {result['status']}",
-        f"Konfirmasi: {result['confirmations']}/4",
+        f"Konfirmasi: {result['confirmations']}/{result['total_indicators']}",
         "",
-        "📌 KONFIRMASI SMC",
+        "📌 KONFIRMASI SMC & PRICE ACTION",
         f"FVG: {result['signals']['FVG']}",
+        f"BOS: {result['signals']['BOS']}",
         f"SNR: {result['signals']['SNR']}",
+        f"SBR/RBS: {sbr_rbs_text}",
         f"SND: {result['signals']['SND']}",
-        f"BOS: {result['signals']['BOS']}"
+        f"RBR/DBD: {rbr_dbd_text}"
     ]
 
     if direction in ("BUY", "SELL"):
@@ -794,7 +1012,6 @@ def analyze_xau_event_impact(title_en, actual_raw, forecast_raw):
     """
     t = title_en.lower()
 
-    # Indikator yang sifatnya terbalik (angka naik = USD lemah = XAUUSD naik)
     inverse_usd = any(
         k in t for k in ("unemployment", "jobless claims", "layoff")
     )
@@ -802,7 +1019,6 @@ def analyze_xau_event_impact(title_en, actual_raw, forecast_raw):
     actual_num = parse_numeric_metric(actual_raw)
     forecast_num = parse_numeric_metric(forecast_raw)
 
-    # Konteks pemicu emas
     if any(k in t for k in ("cpi", "ppi", "pce", "inflation")):
         driver = "Data inflasi US (penentu arah suku bunga The Fed)."
     elif any(k in t for k in ("nfp", "non-farm", "nonfarm", "payroll", "employment", "jobless", "adp")):
@@ -814,7 +1030,6 @@ def analyze_xau_event_impact(title_en, actual_raw, forecast_raw):
     else:
         driver = "Indikator makro USD (berkorelasi terbalik dengan Emas)."
 
-    # Jika hasil aktual sudah keluar dan bisa dibandingkan dengan prediksi
     if actual_num is not None and forecast_num is not None:
         if actual_num == forecast_num:
             return f"{driver}\n⚖️ <b>Efek XAUUSD:</b> Sesuai prediksi (Netral / pantau reaksi teknikal)."
@@ -830,7 +1045,6 @@ def analyze_xau_event_impact(title_en, actual_raw, forecast_raw):
                 return f"{driver}\n🔴 <b>Efek XAUUSD:</b> Data US lebih kuat dari prediksi ➔ USD & Yield naik, <b>Potensi Bearish XAUUSD</b>."
             return f"{driver}\n🟢 <b>Efek XAUUSD:</b> Data US di bawah prediksi ➔ USD melemah, <b>Potensi Bullish XAUUSD</b>."
 
-    # Jika data belum rilis (berikan skenario trading)
     if inverse_usd:
         return (
             f"{driver}\n"
@@ -855,7 +1069,7 @@ def format_calendar_data(data):
     if not items:
         return "<b>📅 KALENDER EKONOMI US</b>\n\nBelum ada jadwal rilis data."
 
-    # Filter khusus US / USD jika field negara/mata uang tersedia
+    # 1. Filter khusus US / USD
     us_items = []
     for item in items:
         if not isinstance(item, dict):
@@ -876,8 +1090,12 @@ def format_calendar_data(data):
     if not filtered:
         return "<b>📅 KALENDER EKONOMI US</b>\n\nTidak ada jadwal ekonomi US ditemukan."
 
-    # Urutkan berdasarkan tingkat dampak tertinggi (High Impact di atas)
-    enriched = []
+    now_wib = datetime.now(WIB)
+    today_start_wib = now_wib.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    upcoming_or_today = []
+    all_parsed = []
+
     for item in filtered:
         title_en = str(
             item.get("title")
@@ -894,20 +1112,46 @@ def format_calendar_data(data):
             or ""
         )
 
+        raw_time = (
+            item.get("time")
+            or item.get("date")
+            or item.get("datetime")
+            or item.get("releaseTime")
+        )
+
+        dt_wib = parse_event_dt_wib(raw_time)
         rank, badge = _impact_rank_and_badge(raw_impact, title_en)
-        enriched.append((rank, badge, title_en, item))
+        entry = (dt_wib, rank, badge, title_en, item)
 
-    enriched.sort(key=lambda x: x[0], reverse=True)
-    top_events = enriched[:8]
+        all_parsed.append(entry)
 
-    # Terjemahkan semua judul event ke Bahasa Indonesia sekaligus
-    titles_en = [entry[2] for entry in top_events]
+        # Hanya ambil jadwal mulai hari ini (00:00 WIB) ke depan (buang tanggal kemarin)
+        if dt_wib is None or dt_wib >= today_start_wib:
+            upcoming_or_today.append(entry)
+
+    active_list = upcoming_or_today if upcoming_or_today else all_parsed
+
+    # Urutkan: Tanggal terdekat dulu -> High Impact di atas -> Jam rilis terawal
+    active_list.sort(
+        key=lambda x: (
+            x[0].date() if x[0] else datetime.max.date(),
+            -x[1],
+            x[0] if x[0] else datetime.max.replace(tzinfo=WIB)
+        )
+    )
+
+    top_events = active_list[:8]
+
+    titles_en = [entry[3] for entry in top_events]
     titles_id = translate_texts_to_id(titles_en)
 
+    bulan_sekarang = BULAN_ID.get(now_wib.month, now_wib.strftime("%b"))
+    tgl_hari_ini = f"{now_wib.day:02d} {bulan_sekarang} {now_wib.year}"
+
     header = (
-        "<b>📅 KALENDER EKONOMI US (FOKUS XAUUSD)</b>\n"
-        "<i>Waktu dikonversi ke WIB • Prioritas Dampak Tinggi</i>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>📅 KALENDER EKONOMI US (FOKUS XAUUSD)</b>\n"
+        f"<i>Mulai {tgl_hari_ini} (WIB) • Prioritas Impact Tinggi</i>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
     )
 
     footer = (
@@ -918,10 +1162,9 @@ def format_calendar_data(data):
     body_blocks = []
     current_len = len(header) + len(footer)
 
-    for idx, (rank, badge, title_en, item) in enumerate(top_events):
+    for idx, (dt_wib, rank, badge, title_en, item) in enumerate(top_events):
         title_id = titles_id[idx]
 
-        # Tampilkan nama terjemahan + istilah asli jika berbeda agar trader tetap kenal istilahnya
         if title_id.lower() != title_en.lower():
             display_title = f"{html.escape(title_id)} <i>({html.escape(title_en)})</i>"
         else:
@@ -934,6 +1177,8 @@ def format_calendar_data(data):
             or item.get("releaseTime")
         )
         time_wib = html.escape(format_wib_time(raw_time))
+
+        is_today_tag = " <b>[HARI INI]</b>" if (dt_wib and dt_wib.date() == now_wib.date()) else ""
 
         actual = item.get("actual")
         forecast = (
@@ -954,7 +1199,7 @@ def format_calendar_data(data):
 
         block = (
             f"\n<b>{idx + 1}. {display_title}</b>\n"
-            f"🇺🇸 USD | {badge}\n"
+            f"🇺🇸 USD | {badge}{is_today_tag}\n"
             f"🕒 <code>{time_wib}</code>\n"
             f"📊 Aktual: <b>{act_str}</b> | Prediksi: <b>{fc_str}</b> | Sblm: <b>{prev_str}</b>\n"
             f"<blockquote>{xau_note}</blockquote>\n"
@@ -1022,7 +1267,6 @@ def format_news_data(data):
     if not items:
         return "<b>📰 BERITA MARKET US &amp; XAUUSD</b>\n\nBelum ada berita terbaru."
 
-    # Prioritaskan berita yang relevan dengan XAUUSD / Makro US
     scored_news = []
     for item in items:
         if not isinstance(item, dict):
@@ -1046,7 +1290,6 @@ def format_news_data(data):
             or ""
         ).strip()
 
-        # Bersihkan tag HTML jika API mengirim snippet ber-HTML
         summary_en = re.sub(r"<[^>]+>", "", summary_en)
         summary_en = re.sub(r"\s+", " ", summary_en).strip()
 
@@ -1064,7 +1307,6 @@ def format_news_data(data):
     if not top_news:
         return "<b>📰 BERITA MARKET US &amp; XAUUSD</b>\n\nBelum ada berita valid."
 
-    # Terjemahkan judul & ringkasan ke Bahasa Indonesia dalam satu kali panggilan
     texts_to_translate = []
     for _, _, _, title_en, summary_en, _ in top_news:
         texts_to_translate.append(title_en)
@@ -1109,7 +1351,6 @@ def format_news_data(data):
         time_wib = html.escape(format_wib_time(raw_time))
 
         tag = "🥇 <b>FOKUS XAUUSD</b>" if is_xau else "🇺🇸 <b>MARKET US</b>"
-
         summary_line = f"{summary_id}\n" if summary_id else ""
 
         block = (
@@ -1246,7 +1487,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 MASTER SMC SCALPING BOT\n\n"
         "Pilih market untuk memulai analisis.\n"
-        "Analisis memakai 100 candle tertutup terakhir.",
+        "Analisis memakai 100 candle tertutup terakhir\n"
+        "(FVG + BOS + SNR + SBR/RBS + SND + RBR/DBD).",
         reply_markup=main_menu()
     )
 
@@ -1258,6 +1500,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Telegram polling aktif.\n"
         "Mode: Manual.\n"
         "Candle: 100 candle tertutup.\n"
+        "Metode: FVG + BOS + SNR + SBR/RBS + SND + RBR/DBD.\n"
         "Market: XAUUSD dan BTCUSD."
     )
 
@@ -1457,7 +1700,7 @@ async def post_init(application):
     log.info("Markets: XAUUSD, BTCUSD")
     log.info("Timeframes: M1 M5 M15 M30 H1 H4")
     log.info("Candles: 100 CLOSED CANDLES")
-    log.info("Strategy: FVG + SNR + SND + BOS")
+    log.info("Strategy: FVG + BOS + SNR + SBR/RBS + SND + RBR/DBD")
     log.info("Mode: MANUAL")
     log.info("======================================")
 
