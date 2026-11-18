@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================
 # MASTER SMC SCALPING BOT — MODULAR EDITION
-# Entry Point Utama (Tidak perlu mengubah .github/workflows/bot.yml)
+# Entry Point Utama
 # ============================================================
 
 import sys
@@ -20,7 +20,7 @@ from smc_engine import (
     analyze_market, create_report, analyze_confluence_pro,
     get_latest_price, check_triple_tf_signal, format_auto_signal_alert
 )
-from chart_generator import generate_smc_chart
+from market_mapper import build_mapping_chart_and_caption
 from fundamental_ai import (
     get_cached_calendar, get_cached_news, get_upcoming_high_impact_us_events
 )
@@ -68,6 +68,9 @@ def main_menu():
             InlineKeyboardButton("₿ BTCUSD", callback_data="market_BTCUSD")
         ],
         [
+            InlineKeyboardButton("🗺️ Mapping Market", callback_data="map_menu")
+        ],
+        [
             InlineKeyboardButton("⚡ Confluence XAU (H4..M1)", callback_data="conf_XAUUSD")
         ],
         [
@@ -111,6 +114,7 @@ def timeframe_menu(symbol):
 def analysis_menu(symbol, timeframe):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"🔄 Refresh {symbol} {timeframe}", callback_data=f"tf_{symbol}_{timeframe}")],
+        [InlineKeyboardButton(f"🗺️ Lihat Mapping {symbol} {timeframe}", callback_data=f"map_tf_{symbol}_{timeframe}")],
         [InlineKeyboardButton(f"⚡ Confluence Pro {symbol} (6 TF)", callback_data=f"conf_{symbol}")],
         [
             InlineKeyboardButton("⬅️ Ganti TF", callback_data=f"market_{symbol}"),
@@ -222,6 +226,7 @@ def help_menu():
             InlineKeyboardButton("🥇 Analisa XAUUSD", callback_data="market_XAUUSD"),
             InlineKeyboardButton("₿ Analisa BTCUSD", callback_data="market_BTCUSD")
         ],
+        [InlineKeyboardButton("🗺️ Mapping Market", callback_data="map_menu")],
         [InlineKeyboardButton("🔔 Atur Sinyal Otomatis", callback_data="sig_menu")],
         [InlineKeyboardButton("🏠 Kembali ke Menu Utama", callback_data="menu")]
     ])
@@ -236,9 +241,9 @@ def build_help_text(user_id):
         "• <code>/menu</code> — Menampilkan tombol pilihan market &amp; berita.\n"
         "• <code>/status</code> — Cek status akses, langganan sinyal &amp; profil risiko.\n"
         "• <code>/panduan</code> — Membuka halaman panduan ini.\n\n"
-        "<b>2️⃣ ZONA JEMPUTAN &amp; CONFLUENCE PRO:</b>\n"
-        "• <b>Chart Struktur Otomatis:</b> Setiap analisa menampilkan gambar candle real-time beserta kotak OB/FVG/RBR-DBD &amp; garis SL/TP.\n"
-        "• <b>Confluence Pro (6 TF):</b> Menggabungkan analisa <b>H4 + H1 + M30 + M15 + M5 + M1</b> berdasarkan suara terbanyak.\n"
+        "<b>2️⃣ FITUR ANALISA &amp; MAPPING:</b>\n"
+        "• <b>Mapping Market:</b> Menggambar peta struktur SMC real-time (OB, FVG, SND, RBR/DBD, BSL/SSL &amp; zona Pending Limit).\n"
+        "• <b>Confluence Pro (6 TF):</b> Menggabungkan analisa <b>H4 + H1 + M30 + M15 + M5 + M1</b>.\n"
         "• <b>Sinyal &amp; Peringatan Otomatis:</b> Notifikasi otomatis saat H1+M15+M5 searah, serta peringatan otomatis menjelang buka sesi Asia (09:00), London (15:00), NY (20:30 WIB) &amp; rilis news CPI/PPI/NFP/FOMC.\n\n"
         "<b>3️⃣ KALKULATOR LOT OTOMATIS:</b>\n"
         "• <code>/setrisk 500 1</code>\n"
@@ -293,7 +298,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"🆔 ID Kamu: <code>{user.id}</code>\n"
         f"📌 Status: <b>{html.escape(status_info)}</b>\n\n"
-        "• <b>7 Metode Murni SMC + Chart Struktur Real-Time</b>\n"
+        "• <b>7 Metode Murni SMC + Mapping Struktur Real-Time</b>\n"
         "• <b>Multi-TF Confluence (6 TF):</b> H4 + H1 + M30 + M15 + M5 + M1\n"
         "• <b>Peringatan Otomatis:</b> Buka Sesi Asia/London/NY &amp; News CPI/PPI/NFP/FOMC"
         f"{admin_hint}",
@@ -760,12 +765,86 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # --- ALUR MAPPING MARKET ---
+    if data == "map_menu":
+        allowed, _, _ = check_user_access(user.id)
+        if not allowed:
+            text, markup = build_locked_message_and_markup(user)
+            await query.message.reply_html(text, reply_markup=markup)
+            return
+        await query.message.reply_text(
+            "🗺️ MAPPING MARKET SMC\nPilih pair yang ingin dipetakan:",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("🥇 XAUUSD", callback_data="map_market_XAUUSD"),
+                    InlineKeyboardButton("₿ BTCUSD", callback_data="map_market_BTCUSD")
+                ],
+                [InlineKeyboardButton("🏠 Menu Utama", callback_data="menu")]
+            ])
+        )
+        return
+
+    if data.startswith("map_market_"):
+        symbol = data.replace("map_market_", "")
+        if symbol not in MARKETS:
+            return
+        rows, row = [], []
+        for tf in TIMEFRAMES:
+            row.append(InlineKeyboardButton(tf, callback_data=f"map_tf_{symbol}_{tf}"))
+            if len(row) == 3:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        rows.append([
+            InlineKeyboardButton("⬅️ Ganti Market", callback_data="map_menu"),
+            InlineKeyboardButton("🏠 Menu Utama", callback_data="menu")
+        ])
+        await query.message.reply_text(
+            f"🗺️ Mapping {symbol}\nPilih timeframe untuk menggambar peta struktur:",
+            reply_markup=InlineKeyboardMarkup(rows)
+        )
+        return
+
+    if data.startswith("map_tf_"):
+        allowed, role, _ = check_user_access(user.id)
+        if not allowed:
+            text, markup = build_locked_message_and_markup(user)
+            await query.message.reply_html(text, reply_markup=markup)
+            return
+
+        _, _, symbol, timeframe = data.split("_")
+        if symbol not in MARKETS or timeframe not in TIMEFRAMES:
+            return
+
+        processing = await query.message.reply_text(f"🗺️ Menggambar peta struktur {symbol} ({timeframe})...")
+        try:
+            chart_buf, caption = await asyncio.to_thread(build_mapping_chart_and_caption, symbol, timeframe)
+            if role == "TRIAL":
+                await asyncio.to_thread(consume_trial_if_needed, user.id)
+            await processing.delete()
+            await query.message.reply_photo(
+                photo=chart_buf,
+                caption=caption,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(f"🔄 Refresh Map {symbol} {timeframe}", callback_data=f"map_tf_{symbol}_{timeframe}")],
+                    [
+                        InlineKeyboardButton("⬅️ Ganti TF", callback_data=f"map_market_{symbol}"),
+                        InlineKeyboardButton("🏠 Menu Utama", callback_data="menu")
+                    ]
+                ])
+            )
+        except Exception as err:
+            await processing.edit_text(f"❌ Gagal membuat mapping:\n{str(err)[:1500]}")
+        return
+
+    # --- ALUR ANALISA SINYAL ---
     if data.startswith("market_"):
         symbol = data.replace("market_", "")
         if symbol not in MARKETS:
             return
         await query.message.reply_text(
-            f"Market: {symbol}\nPilih timeframe (langsung analisa + chart) atau Confluence Pro (6 TF):",
+            f"Market: {symbol}\nPilih timeframe untuk analisa atau Confluence Pro (6 TF):",
             reply_markup=timeframe_menu(symbol)
         )
         return
@@ -781,9 +860,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if symbol not in MARKETS or timeframe not in TIMEFRAMES:
             return
 
-        processing = await query.message.reply_text(
-            f"⏳ Menganalisis {symbol} {timeframe} & menggambar chart struktur..."
-        )
+        processing = await query.message.reply_text(f"⏳ Menganalisis {symbol} {timeframe}...")
         try:
             result = await asyncio.to_thread(analyze_market, symbol, timeframe)
             risk_profile = get_user_risk_profile(user.id)
@@ -794,17 +871,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 _, _, new_status = check_user_access(user.id)
                 report_text += f"\n\n🎁 {new_status}"
 
-            try:
-                chart_buf = await asyncio.to_thread(generate_smc_chart, result["candles"], result)
-                await processing.delete()
-                await query.message.reply_photo(
-                    photo=chart_buf,
-                    caption=f"📊 Chart Struktur SMC Real-Time — {symbol} ({timeframe})"
-                )
-                await query.message.reply_text(report_text, reply_markup=analysis_menu(symbol, timeframe))
-            except Exception as chart_err:
-                log.warning("Chart render error: %s", chart_err)
-                await processing.edit_text(report_text, reply_markup=analysis_menu(symbol, timeframe))
+            await processing.edit_text(report_text, reply_markup=analysis_menu(symbol, timeframe))
         except Exception as err:
             await processing.edit_text(f"❌ ANALISIS GAGAL:\n{str(err)[:2000]}")
         return
