@@ -45,9 +45,13 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 BASE_URL = "https://biquote.io"
 
 GEMINI_MODELS = [
-    "gemini-2.5-flash",
-    "gemini-2.0-flash"
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3-flash-preview"
 ]
+
+LAST_GEMINI_ERROR = ""
 
 MARKETS = ["XAUUSD", "BTCUSD"]
 
@@ -91,7 +95,7 @@ log = logging.getLogger("SMC_BOT")
 SESSION = requests.Session()
 
 SESSION.headers.update({
-    "User-Agent": "Mozilla/5.0 SMC-Bot/2.3",
+    "User-Agent": "Mozilla/5.0 SMC-Bot/2.4",
     "Accept": "application/json"
 })
 
@@ -125,8 +129,11 @@ def call_gemini_json(prompt_text):
     Memanggil Gemini API khusus untuk analisa fundamental kalender ekonomi
     dan berita market. Tidak digunakan untuk analisa candle.
     """
+    global LAST_GEMINI_ERROR
+
     if not GEMINI_API_KEY:
-        log.warning("GEMINI_API_KEY kosong, menggunakan mode cadangan.")
+        LAST_GEMINI_ERROR = "GEMINI_API_KEY belum terbaca di env workflow (.github/workflows/main.yml)."
+        log.warning(LAST_GEMINI_ERROR)
         return None
 
     payload = {
@@ -143,38 +150,43 @@ def call_gemini_json(prompt_text):
         }
     }
 
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": GEMINI_API_KEY
+    }
+
     for model_name in GEMINI_MODELS:
         url = (
             f"https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{model_name}:generateContent?key={GEMINI_API_KEY}"
+            f"{model_name}:generateContent"
         )
         try:
-            resp = SESSION.post(url, json=payload, timeout=25)
+            resp = SESSION.post(url, headers=headers, json=payload, timeout=25)
             if resp.status_code != 200:
-                log.warning(
-                    "Gemini %s HTTP %s: %s",
-                    model_name,
-                    resp.status_code,
-                    resp.text[:250]
-                )
+                err_msg = resp.text[:220]
+                LAST_GEMINI_ERROR = f"Model {model_name} gagal (HTTP {resp.status_code})"
+                log.warning("Gemini %s HTTP %s: %s", model_name, resp.status_code, err_msg)
                 continue
 
             body = resp.json()
             candidates = body.get("candidates") or []
             if not candidates:
+                LAST_GEMINI_ERROR = f"Model {model_name} tidak mengembalikan jawaban."
                 continue
 
             parts = candidates[0].get("content", {}).get("parts") or []
             raw_text = "".join(p.get("text", "") for p in parts).strip()
 
-            # Bersihkan markdown fence jika ada
             raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text)
             raw_text = re.sub(r"\s*```$", "", raw_text).strip()
 
-            return json.loads(raw_text)
+            parsed = json.loads(raw_text)
+            LAST_GEMINI_ERROR = ""
+            return parsed
 
         except Exception as err:
-            log.warning("Gagal memanggil Gemini (%s): %s", model_name, err)
+            LAST_GEMINI_ERROR = f"Error koneksi Gemini ({model_name}): {str(err)[:120]}"
+            log.warning(LAST_GEMINI_ERROR)
 
     return None
 
@@ -182,6 +194,25 @@ def call_gemini_json(prompt_text):
 # ============================================================
 # TIME & METRIC HELPERS
 # ============================================================
+
+def extract_raw_time(item):
+    """
+    Mencari field waktu dari berbagai kemungkinan nama properti API.
+    """
+    if not isinstance(item, dict):
+        return None
+
+    keys = (
+        "publishedAt", "published_at", "pubDate", "publishedDate",
+        "time", "date", "datetime", "releaseTime",
+        "createdAt", "created_at", "updatedAt", "timestamp"
+    )
+    for k in keys:
+        val = item.get(k)
+        if val not in (None, ""):
+            return val
+    return None
+
 
 def parse_event_dt_wib(value):
     """
@@ -218,7 +249,7 @@ def format_wib_time(value):
         return f"{dt_wib.day:02d} {bulan} {dt_wib.year} | {dt_wib.strftime('%H:%M')} WIB"
 
     if value is None or str(value).strip() == "":
-        return "Waktu belum tersedia"
+        return "Terkini (Hari Ini)"
 
     return str(value).strip()
 
@@ -1065,26 +1096,18 @@ def format_calendar_data(data):
             or ""
         )
 
-        raw_time = (
-            item.get("time")
-            or item.get("date")
-            or item.get("datetime")
-            or item.get("releaseTime")
-        )
-
+        raw_time = extract_raw_time(item)
         dt_wib = parse_event_dt_wib(raw_time)
         rank, badge = _impact_rank_and_badge(raw_impact, title_en)
         entry = (dt_wib, rank, badge, title_en, item)
 
         all_parsed.append(entry)
 
-        # Hanya ambil jadwal mulai hari ini (00:00 WIB) ke depan (buang tanggal kemarin)
         if dt_wib is None or dt_wib >= today_start_wib:
             upcoming_or_today.append(entry)
 
     active_list = upcoming_or_today if upcoming_or_today else all_parsed
 
-    # Urutkan: Tanggal terdekat dulu -> Dampak Besar di atas -> Jam rilis terawal
     active_list.sort(
         key=lambda x: (
             x[0].date() if x[0] else datetime.max.date(),
@@ -1095,7 +1118,6 @@ def format_calendar_data(data):
 
     top_events = active_list[:7]
 
-    # Siapkan payload untuk dianalisa Gemini AI
     gemini_input = []
     for idx, (dt_wib, rank, badge, title_en, item) in enumerate(top_events):
         gemini_input.append({
@@ -1142,7 +1164,6 @@ def format_calendar_data(data):
         else:
             display_title = html.escape(title_en)
 
-        # Sesuaikan badge dampak ke Emas berdasarkan penilaian AI jika tersedia
         rel = str(ai_info.get("gold_relevance") or "").upper()
         if rel == "HIGH":
             display_badge = "🔥 DAMPAK BESAR KE EMAS"
@@ -1153,12 +1174,7 @@ def format_calendar_data(data):
         else:
             display_badge = badge
 
-        raw_time = (
-            item.get("time")
-            or item.get("date")
-            or item.get("datetime")
-            or item.get("releaseTime")
-        )
+        raw_time = extract_raw_time(item)
         time_wib = html.escape(format_wib_time(raw_time))
         is_today_tag = " <b>[HARI INI]</b>" if (dt_wib and dt_wib.date() == now_wib.date()) else ""
 
@@ -1207,7 +1223,6 @@ def format_calendar_data(data):
                     f"• Jika hasil <b>LEBIH RENDAH</b> dari perkiraan ➔ Emas {lo_fmt}"
                 )
         else:
-            # Fallback jika GEMINI_API_KEY belum diisi
             pct_fallback = {3: "80%", 2: "65%", 1: "55%"}.get(rank, "65%")
             inverse_usd = any(
                 k in title_en.lower() for k in ("unemployment", "jobless claims", "layoff")
@@ -1319,7 +1334,6 @@ def format_news_data(data):
     if not valid_items:
         return "<b>📰 BERITA MARKET US &amp; EMAS (XAUUSD)</b>\n\nBelum ada berita valid."
 
-    # Kirim maksimal 10 berita ke Gemini untuk disaring & dianalisa isunya
     sample_items = valid_items[:10]
     gemini_input = [
         {
@@ -1373,13 +1387,7 @@ def format_news_data(data):
                 ).strip()
             )
 
-            raw_time = (
-                raw_item.get("publishedAt")
-                or raw_item.get("published_at")
-                or raw_item.get("time")
-                or raw_item.get("date")
-                or raw_item.get("datetime")
-            )
+            raw_time = extract_raw_time(raw_item)
             time_wib = html.escape(format_wib_time(raw_time))
 
             tag = "🥇 <b>FOKUS EMAS</b>" if is_gold else "🇺🇸 <b>BERITA US</b>"
@@ -1407,7 +1415,10 @@ def format_news_data(data):
             current_len += len(block)
 
     else:
-        # Fallback jika GEMINI_API_KEY belum diset
+        diag_note = html.escape(
+            LAST_GEMINI_ERROR
+            or "Pastikan GEMINI_API_KEY sudah ditambahkan di GitHub Secrets & file main.yml."
+        )
         for idx, (title_en, summary_en, raw_item) in enumerate(sample_items[:6]):
             source = html.escape(
                 str(
@@ -1417,13 +1428,7 @@ def format_news_data(data):
                     or "Market Wire"
                 ).strip()
             )
-            raw_time = (
-                raw_item.get("publishedAt")
-                or raw_item.get("published_at")
-                or raw_item.get("time")
-                or raw_item.get("date")
-                or raw_item.get("datetime")
-            )
+            raw_time = extract_raw_time(raw_item)
             time_wib = html.escape(format_wib_time(raw_time))
 
             block = (
@@ -1431,7 +1436,7 @@ def format_news_data(data):
                 f"<b>{idx + 1}. {html.escape(title_en)}</b>\n"
                 f"🕒 <code>{time_wib}</code>\n"
                 f"<blockquote>{html.escape(summary_en or 'Tidak ada ringkasan.')}\n"
-                f"⚠️ <i>Tambahkan GEMINI_API_KEY di GitHub Secrets untuk analisa isu otomatis.</i></blockquote>\n"
+                f"⚠️ <i>{diag_note}</i></blockquote>\n"
             )
 
             if current_len + len(block) > 3850:
@@ -1569,13 +1574,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    ai_status = "Aktif (Kalender & Berita)" if GEMINI_API_KEY else "Belum diset (Mode Cadangan)"
+    if GEMINI_API_KEY:
+        ai_status = f"Terdeteksi (Akhiran ...{GEMINI_API_KEY[-4:]})"
+    else:
+        ai_status = "TIDAK TERDETEKSI (Cek main.yml & GitHub Secrets)"
 
     await update.message.reply_text(
         "🟢 BOT ONLINE\n"
         "Telegram polling aktif.\n"
         "Analisa Candle: Murni SMC (Tanpa AI).\n"
-        f"Gemini AI Berita/Ekonomi: {ai_status}.\n"
+        f"GEMINI_API_KEY: {ai_status}.\n"
         "Market: XAUUSD dan BTCUSD."
     )
 
