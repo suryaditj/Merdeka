@@ -90,6 +90,61 @@ def _impact_rank_and_badge(raw_impact, title_en):
     return 1, "🔹 DAMPAK KECIL"
 
 
+def get_upcoming_high_impact_us_events(window_minutes=35):
+    """
+    Mengecek kalender ekonomi US dan mengembalikan daftar berita High Impact
+    (CPI, PPI, PCE, NFP, FOMC, Fed, GDP, Retail Sales, dll) yang akan rilis
+    dalam 1 hingga window_minutes menit ke depan.
+    """
+    raw_data = api_get("/api/calendar")
+    items = _extract_list_payload(raw_data)
+    if not items:
+        return []
+
+    now_wib = datetime.now(WIB)
+    upcoming = []
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        country = str(
+            item.get("country") or item.get("currency") or item.get("ccy") or item.get("code") or ""
+        ).strip().upper()
+        if country not in ("US", "USA", "USD", "UNITED STATES", "UNITED STATES OF AMERICA"):
+            continue
+
+        title_en = str(
+            item.get("title") or item.get("event") or item.get("name") or item.get("indicator") or ""
+        ).strip()
+        if not title_en:
+            continue
+
+        raw_impact = item.get("impact") or item.get("importance") or item.get("volatility") or ""
+        rank, _ = _impact_rank_and_badge(raw_impact, title_en)
+        if rank < 3:
+            continue
+
+        dt_wib = parse_event_dt_wib(extract_raw_time(item))
+        if dt_wib is None:
+            continue
+
+        diff_minutes = (dt_wib - now_wib).total_seconds() / 60.0
+        if 1 <= diff_minutes <= window_minutes:
+            forecast = item.get("forecast") or item.get("consensus") or item.get("estimate") or "-"
+            previous = item.get("previous") or item.get("prior") or "-"
+            upcoming.append({
+                "key": f"{dt_wib.strftime('%Y%m%d_%H%M')}_{title_en}",
+                "title": title_en,
+                "time_wib": dt_wib.strftime("%H:%M WIB"),
+                "minutes_left": int(round(diff_minutes)),
+                "forecast": str(forecast),
+                "previous": str(previous)
+            })
+
+    return upcoming
+
+
 def _analyze_calendar_with_gemini(events_payload):
     prompt = (
         "Analis fundamental Emas (XAUUSD) untuk pemula (bahasa Indonesia sehari-hari, singkat, jelas).\n"
