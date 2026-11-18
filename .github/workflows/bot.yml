@@ -3,21 +3,24 @@ name: MASTER SMC SCALPING BOT
 
 on:
   workflow_dispatch:
-
-  schedule:
-    - cron: "0 */6 * * *"
+  push:
+    branches:
+      - main
+    paths:
+      - main.py
+      - .github/workflows/bot.yml
 
 permissions:
   contents: read
 
 concurrency:
-  group: master-smc-bot
+  group: master-smc-scalping-bot
   cancel-in-progress: true
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 355
+    timeout-minutes: 360
 
     steps:
       - name: Checkout Repository
@@ -33,7 +36,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install python-telegram-bot==21.10 requests==2.32.3
 
-      - name: Start Telegram Bot
+      - name: Check Python Syntax
+        run: |
+          python -m py_compile main.py
+          echo "Syntax OK"
+
+      - name: Run Telegram Bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           PYTHONUNBUFFERED: "1"
@@ -42,9 +50,10 @@ jobs:
           timeout --signal=INT --kill-after=30s 21000s python -u main.py
           STATUS=$?
 
-          if [ "$STATUS" -eq 124 ] || [ "$STATUS" -eq 130 ]; then
+          if [ "$STATUS" -eq 124 ] || [ "$STATUS" -eq 130 ] || [ "$STATUS" -eq 0 ]; then
             echo "Bot selesai sesuai jadwal."
             exit 0
           fi
 
+          echo "Bot berhenti dengan error: $STATUS"
           exit "$STATUS"
