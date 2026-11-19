@@ -610,7 +610,7 @@ async def cmd_set_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# CALLBACK HANDLER (MENU & ANALISA)
+# CALLBACK HANDLER (SEMUA HASIL ANALISA TERSIMPAN PERMANEN DI CHAT)
 # ============================================================
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -633,7 +633,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "help_commands":
-        await query.message.edit_text(build_help_text(user.id), parse_mode="HTML", reply_markup=help_menu())
+        await query.message.reply_html(build_help_text(user.id), reply_markup=help_menu())
         return
 
     if data == "check_my_status":
@@ -641,56 +641,52 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if allowed:
             risk = get_user_risk_profile(user.id)
             risk_str = f"Modal ${risk['balance']:,.0f} | Risk {risk['risk_pct']:.1f}%" if risk else "Belum diatur (/setrisk)"
-            await query.message.edit_text(
+            await query.message.reply_html(
                 f"👤 <b>STATUS AKUN KAMU</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
                 f"🆔 ID Kamu: <code>{user.id}</code>\n"
                 f"📌 Status: <b>{html.escape(status_info)}</b>\n"
                 f"🧮 Profil Lot: <b>{risk_str}</b>",
-                parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Kembali ke Menu", callback_data="menu")]])
             )
         else:
             text, markup = build_locked_message_and_markup(user)
-            await query.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
+            await query.message.reply_html(text, reply_markup=markup)
         return
 
     if data == "menu":
         allowed, _, _ = check_user_access(user.id)
         if not allowed:
             text, markup = build_locked_message_and_markup(user)
-            await query.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
+            await query.message.reply_html(text, reply_markup=markup)
             return
-        await query.message.edit_text(build_main_menu_text(), parse_mode="HTML", reply_markup=main_menu())
+        await query.message.reply_html(build_main_menu_text(), reply_markup=main_menu())
         return
 
-    # --- SUB-MENU PILIHAN METODE (SCALPING / INTRA DAY) ---
     if data.startswith("market_"):
         allowed, _, _ = check_user_access(user.id)
         if not allowed:
             text, markup = build_locked_message_and_markup(user)
-            await query.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
+            await query.message.reply_html(text, reply_markup=markup)
             return
 
         symbol = data.replace("market_", "")
         if symbol not in MARKETS:
             return
         sym_icon = "🪙" if symbol == "XAUUSD" else "₿"
-        await query.message.edit_text(
+        await query.message.reply_html(
             f"📊 <b>MARKET TERPILIH: {sym_icon} {symbol}</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             "<b>PILIHAN METODE ANALISA:</b>",
-            parse_mode="HTML",
             reply_markup=method_menu(symbol)
         )
         return
 
-    # --- EKSEKUSI ANALISA 3-TF (ANTI-WAIT) ---
     if data.startswith("run_"):
         allowed, role, _ = check_user_access(user.id)
         if not allowed:
             text, markup = build_locked_message_and_markup(user)
-            await query.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
+            await query.message.reply_html(text, reply_markup=markup)
             return
 
         _, symbol, mode = data.split("_")
@@ -698,9 +694,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         tf_desc = "H1 • M30 • M15" if mode == "SCALPING" else "D1 • H4 • H1"
-        await query.message.edit_text(
-            f"⏳ <i>Menganalisa {symbol} mode {mode} ({tf_desc})...</i>",
-            parse_mode="HTML"
+        processing = await query.message.reply_html(
+            f"⏳ <i>Menganalisa {symbol} mode {mode} ({tf_desc})...</i>"
         )
 
         try:
@@ -713,25 +708,24 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 _, _, new_status = check_user_access(user.id)
                 report_text += f"\n\n🎁 <i>{html.escape(new_status)}</i>"
 
-            await query.message.edit_text(
+            await processing.edit_text(
                 report_text,
                 parse_mode="HTML",
                 reply_markup=signal_result_menu(symbol, mode)
             )
         except Exception as err:
-            await query.message.edit_text(
+            await processing.edit_text(
                 f"❌ <b>ANALISA GAGAL:</b>\n{html.escape(str(err)[:1500])}",
                 parse_mode="HTML",
                 reply_markup=signal_result_menu(symbol, mode)
             )
         return
 
-    # --- CEK USOIL & DXY ---
     if data.startswith("macro_"):
         allowed, _, _ = check_user_access(user.id)
         if not allowed:
             text, markup = build_locked_message_and_markup(user)
-            await query.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
+            await query.message.reply_html(text, reply_markup=markup)
             return
 
         parts = data.split("_")
@@ -740,66 +734,61 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if symbol not in MACRO_MARKETS:
             return
 
-        await query.message.edit_text(f"⏳ <i>Mengambil data {symbol} terbaru...</i>", parse_mode="HTML")
+        processing = await query.message.reply_html(f"⏳ <i>Mengambil data {symbol} terbaru...</i>")
         try:
             report = await asyncio.to_thread(get_macro_market_report, symbol, force)
-            await query.message.edit_text(
+            await processing.edit_text(
                 report,
                 parse_mode="HTML",
                 reply_markup=info_menu(f"macro_{symbol}_refresh")
             )
         except Exception as err:
-            await query.message.edit_text(
+            await processing.edit_text(
                 f"❌ <b>Gagal mengambil data {symbol}:</b>\n{html.escape(str(err)[:1500])}",
                 parse_mode="HTML",
                 reply_markup=info_menu(f"macro_{symbol}_refresh")
             )
         return
 
-    # --- BERITA EKONOMI US (WIB) ---
     if data in ("calendar", "calendar_refresh"):
         allowed, _, _ = check_user_access(user.id)
         if not allowed:
             text, markup = build_locked_message_and_markup(user)
-            await query.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
+            await query.message.reply_html(text, reply_markup=markup)
             return
 
         force = (data == "calendar_refresh")
-        await query.message.edit_text("⏳ <i>Mengambil jadwal berita ekonomi US (WIB)...</i>", parse_mode="HTML")
+        processing = await query.message.reply_html("⏳ <i>Mengambil jadwal berita ekonomi US (WIB)...</i>")
         try:
             formatted = await asyncio.to_thread(get_cached_calendar, force)
-            await query.message.edit_text(formatted, parse_mode="HTML", reply_markup=info_menu("calendar_refresh"))
+            await processing.edit_text(formatted, parse_mode="HTML", reply_markup=info_menu("calendar_refresh"))
         except Exception as err:
-            await query.message.edit_text(
+            await processing.edit_text(
                 f"❌ <b>Gagal memuat berita ekonomi:</b>\n{html.escape(str(err)[:1500])}",
                 parse_mode="HTML",
                 reply_markup=info_menu("calendar_refresh")
             )
         return
 
-    # --- SESI MARKET (WIB) ---
     if data in ("session_wib", "session_wib_refresh"):
-        await query.message.edit_text(
+        await query.message.reply_html(
             build_session_report(),
-            parse_mode="HTML",
             reply_markup=info_menu("session_wib_refresh")
         )
         return
 
-    # --- KALKULATOR LOT ---
     if data == "lot_calc":
         risk_prof = get_user_risk_profile(user.id)
-        await query.message.edit_text(
+        await query.message.reply_html(
             build_lot_calculator_guide(risk_prof),
-            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Kembali ke Menu", callback_data="menu")]])
         )
         return
 
-    # --- REKAP WINRATE ---
     if data in ("winrate", "winrate_refresh"):
+        processing = await query.message.reply_html("⏳ <i>Menghitung rekap akurasi sinyal...</i>")
         await asyncio.to_thread(evaluate_open_signals, get_latest_price)
-        await query.message.edit_text(
+        await processing.edit_text(
             build_winrate_report(),
             parse_mode="HTML",
             reply_markup=info_menu("winrate_refresh")
@@ -816,7 +805,6 @@ async def background_monitor(application):
     tick = 0
     while True:
         try:
-            # 1. Cek Price Alert Pribadi User tiap 1 menit
             if USERS_DB["price_alerts"]:
                 latest_prices = {}
                 for sym in MARKETS:
@@ -862,7 +850,6 @@ async def background_monitor(application):
                     ]
                     await asyncio.to_thread(sync_users)
 
-            # 2. Update status TP1/TP2/TP3/SL untuk Rekap Winrate tiap 5 menit
             if tick % 5 == 0:
                 await asyncio.to_thread(evaluate_open_signals, get_latest_price)
 
