@@ -18,6 +18,7 @@ GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY", "").strip()
 ENV_ADMIN_ID = os.getenv("ADMIN_ID", "").strip()
 
 USERS_FILE = "users.json"
+SIGNALS_FILE = "signals_history.json"
 BASE_URL = "https://biquote.io"
 
 GEMINI_MODELS = [
@@ -26,6 +27,7 @@ GEMINI_MODELS = [
 ]
 
 MARKETS = ["XAUUSD", "BTCUSD"]
+MACRO_MARKETS = ["USOIL", "DXY"]
 
 TIMEFRAMES = {
     "M1": "1m",
@@ -33,7 +35,8 @@ TIMEFRAMES = {
     "M15": "15m",
     "M30": "30m",
     "H1": "1h",
-    "H4": "4h"
+    "H4": "4h",
+    "D1": "1d"
 }
 
 CANDLE_COUNT = 100
@@ -62,7 +65,7 @@ log = logging.getLogger("SMC_BOT")
 
 SESSION = requests.Session()
 SESSION.headers.update({
-    "User-Agent": "Mozilla/5.0 SMC-Bot/4.0",
+    "User-Agent": "Mozilla/5.0 SMC-Bot/5.0",
     "Accept": "application/json"
 })
 
@@ -80,6 +83,10 @@ def api_get(endpoint, params=None):
 # ============================================================
 # TIME & PRICE FORMATTING HELPERS
 # ============================================================
+
+def now_wib():
+    return datetime.now(WIB)
+
 
 def today_wib_date():
     return datetime.now(WIB).date()
