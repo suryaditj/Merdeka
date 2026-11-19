@@ -1,0 +1,20 @@
+{
+  "records": [
+    {
+      "id": "20261120034822",
+      "time_wib": "20/11 03:48 WIB",
+      "date_ymd": "2026-11-20",
+      "symbol": "XAUUSD",
+      "mode": "SCALPING",
+      "direction": "SELL",
+      "entry_low": 3673.888,
+      "entry_high": 3679.4591,
+      "entry_mid": 3676.6735,
+      "sl": 3695.4759,
+      "tp1": 3652.3001,
+      "tp2": 3630.7121,
+      "tp3": 3609.1242,
+      "status": "OPEN"
+    }
+  ]
+}
