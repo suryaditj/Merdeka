@@ -1,8 +1,10 @@
 {
   "free_mode": false,
   "trial_limit": 2,
-  "admin_username": "",
-  "admin_ids": [],
+  "admin_username": "acingganteng",
+  "admin_ids": [
+    7565078792
+  ],
   "members": {},
   "trials": {},
   "risk_profiles": {},
