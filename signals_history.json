@@ -15,6 +15,22 @@
       "tp2": 3630.7121,
       "tp3": 3609.1242,
       "status": "OPEN"
+    },
+    {
+      "id": "20261120034951",
+      "time_wib": "20/11 03:49 WIB",
+      "date_ymd": "2026-11-20",
+      "symbol": "XAUUSD",
+      "mode": "INTRADAY",
+      "direction": "SELL",
+      "entry_low": 3719.748,
+      "entry_high": 3744.548,
+      "entry_mid": 3732.148,
+      "sl": 3784.3123,
+      "tp1": 3655.1837,
+      "tp2": 3590.6194,
+      "tp3": 3526.0551,
+      "status": "OPEN"
     }
   ]
 }
