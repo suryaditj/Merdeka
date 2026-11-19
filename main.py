@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# MASTER SMC SCALPING BOT — MODULAR EDITION
-# Entry Point Utama
+# SMC HYBRID ANALISIS BOT — CLEAN MODULAR EDITION
 # ============================================================
 
 import sys
@@ -14,47 +13,25 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 
 from config import (
     BOT_TOKEN, GEMINI_API_KEY, GITHUB_TOKEN, GITHUB_REPOSITORY,
-    MARKETS, TIMEFRAMES, WIB, log, format_price, today_wib_date, parse_date_ymd
+    MARKETS, MACRO_MARKETS, WIB, BULAN_ID, log, format_price,
+    today_wib_date, parse_date_ymd
 )
 from smc_engine import (
-    analyze_market, create_report, analyze_confluence_pro,
-    get_latest_price, check_triple_tf_signal, format_auto_signal_alert
+    analyze_hybrid_3tf, format_hybrid_signal_report, get_latest_price
 )
-from market_mapper import build_mapping_chart_and_caption
 from fundamental_ai import (
-    get_cached_calendar, get_cached_news, get_upcoming_high_impact_us_events
+    get_cached_calendar, get_macro_market_report
+)
+from session_tools import (
+    build_session_report, build_lot_calculator_guide, calculate_lot_for_pair,
+    load_signals_db, evaluate_open_signals, build_winrate_report
 )
 from user_manager import (
     USERS_DB, load_users_db, sync_users, is_admin, is_free_mode, toggle_free_mode,
     check_user_access, consume_trial_if_needed, set_user_risk_profile,
     get_user_risk_profile, add_price_alert, get_user_alerts,
-    clear_user_alerts, build_locked_message_and_markup,
-    get_user_signal_sub, set_user_signal_sub, get_signal_subscribers_for
+    clear_user_alerts, build_locked_message_and_markup
 )
-
-LAST_BROADCAST_SIGNALS = {}
-SENT_SESSION_WARNINGS = set()
-SENT_NEWS_WARNINGS = set()
-
-
-def get_all_warning_recipients():
-    today = today_wib_date()
-    recipients = set(USERS_DB["admin_ids"])
-
-    for uid_str, info in USERS_DB["members"].items():
-        if uid_str.isdigit() and isinstance(info, dict):
-            exp = parse_date_ymd(info.get("expired", ""))
-            if exp and today <= exp:
-                recipients.add(int(uid_str))
-
-    for uid_str in USERS_DB["signal_subs"].keys():
-        if uid_str.isdigit():
-            uid = int(uid_str)
-            allowed, _, _ = check_user_access(uid)
-            if allowed:
-                recipients.add(uid)
-
-    return sorted(recipients)
 
 
 # ============================================================
@@ -64,113 +41,65 @@ def get_all_warning_recipients():
 def main_menu():
     keyboard = [
         [
-            InlineKeyboardButton("🥇 XAUUSD", callback_data="market_XAUUSD"),
+            InlineKeyboardButton("🪙 XAUUSD", callback_data="market_XAUUSD"),
             InlineKeyboardButton("₿ BTCUSD", callback_data="market_BTCUSD")
         ],
         [
-            InlineKeyboardButton("🗺️ Mapping Market", callback_data="map_menu")
+            InlineKeyboardButton("🛢️ Cek USOIL", callback_data="macro_USOIL"),
+            InlineKeyboardButton("💵 Cek DXY", callback_data="macro_DXY")
         ],
         [
-            InlineKeyboardButton("⚡ Confluence XAU (H4..M1)", callback_data="conf_XAUUSD")
+            InlineKeyboardButton("📰 Berita Ekonomi US", callback_data="calendar"),
+            InlineKeyboardButton("⏰ Sesi Market (WIB)", callback_data="session_wib")
         ],
         [
-            InlineKeyboardButton("⚡ Confluence BTC (H4..M1)", callback_data="conf_BTCUSD")
+            InlineKeyboardButton("🧮 Kalkulator Lot", callback_data="lot_calc"),
+            InlineKeyboardButton("📈 Rekap Winrate", callback_data="winrate")
         ],
         [
-            InlineKeyboardButton("🔔 Sinyal & Peringatan Otomatis", callback_data="sig_menu")
-        ],
-        [
-            InlineKeyboardButton("📅 Kalender Ekonomi US", callback_data="calendar"),
-            InlineKeyboardButton("📰 Berita Market", callback_data="news")
-        ],
-        [
-            InlineKeyboardButton("📖 Panduan & Perintah Bot", callback_data="help_commands"),
+            InlineKeyboardButton("📖 Panduan & Perintah", callback_data="help_commands"),
             InlineKeyboardButton("👤 Status Akun", callback_data="check_my_status")
         ]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 
-def timeframe_menu(symbol):
-    keyboard = []
-    row = []
-    for tf in TIMEFRAMES:
-        row.append(InlineKeyboardButton(tf, callback_data=f"tf_{symbol}_{tf}"))
-        if len(row) == 3:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
-
-    keyboard.append([
-        InlineKeyboardButton(f"⚡ Confluence Pro {symbol} (6 TF: H4..M1)", callback_data=f"conf_{symbol}")
-    ])
-    keyboard.append([
-        InlineKeyboardButton("⬅️ Menu Utama", callback_data="menu")
-    ])
-    return InlineKeyboardMarkup(keyboard)
-
-
-def analysis_menu(symbol, timeframe):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"🔄 Refresh {symbol} {timeframe}", callback_data=f"tf_{symbol}_{timeframe}")],
-        [InlineKeyboardButton(f"🗺️ Lihat Mapping {symbol} {timeframe}", callback_data=f"map_tf_{symbol}_{timeframe}")],
-        [InlineKeyboardButton(f"⚡ Confluence Pro {symbol} (6 TF)", callback_data=f"conf_{symbol}")],
-        [
-            InlineKeyboardButton("⬅️ Ganti TF", callback_data=f"market_{symbol}"),
-            InlineKeyboardButton("🏠 Menu Utama", callback_data="menu")
-        ]
-    ])
-
-
-def confluence_menu(symbol):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 Refresh Confluence (6 TF)", callback_data=f"conf_{symbol}")],
-        [
-            InlineKeyboardButton(f"📊 Pilih TF {symbol}", callback_data=f"market_{symbol}"),
-            InlineKeyboardButton("🏠 Menu Utama", callback_data="menu")
-        ]
-    ])
-
-
-def signal_settings_menu(current_sub):
-    def mark(code, label):
-        return f"✅ {label}" if current_sub == code else label
-
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(mark("ALL", "Aktifkan XAUUSD & BTCUSD"), callback_data="sig_set_ALL")],
-        [
-            InlineKeyboardButton(mark("XAUUSD", "Khusus XAUUSD"), callback_data="sig_set_XAUUSD"),
-            InlineKeyboardButton(mark("BTCUSD", "Khusus BTCUSD"), callback_data="sig_set_BTCUSD")
-        ],
-        [InlineKeyboardButton(mark("OFF", "Matikan Sinyal 3-TF"), callback_data="sig_set_OFF")],
-        [InlineKeyboardButton("🏠 Kembali ke Menu Utama", callback_data="menu")]
-    ])
-
-
-def build_signal_settings_text(user_id):
-    sub = get_user_signal_sub(user_id)
-    status_label = {
-        "ALL": "🟢 AKTIF (XAUUSD & BTCUSD)",
-        "XAUUSD": "🟢 AKTIF (Khusus XAUUSD)",
-        "BTCUSD": "🟢 AKTIF (Khusus BTCUSD)",
-        "OFF": "⚪ NONAKTIF (Belum diaktifkan)"
-    }.get(sub, "⚪ NONAKTIF")
-
+def build_main_menu_text():
+    now = datetime.now(WIB)
+    bulan = BULAN_ID.get(now.month, now.strftime("%b"))
+    waktu_str = f"{now.day:02d} {bulan} {now.year} • {now.strftime('%H:%M')} WIB"
     return (
-        "🔔 <b>SINYAL &amp; PERINGATAN OTOMATIS</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        f"Status Sinyal 3-TF Kamu: <b>{status_label}</b>\n\n"
-        "<b>1️⃣ Sinyal Otomatis 3-TF (H1 + M15 + M5):</b>\n"
-        "Bot memindai pasar tiap <b>10 menit</b> dan mengirim sinyal otomatis apabila <b>H1, M15, dan M5 kompak searah</b> dengan minimal 4/7 konfirmasi SMC.\n\n"
-        "<b>2️⃣ Peringatan Otomatis Buka Sesi (Winter Time WIB) &amp; News Besar:</b>\n"
-        "• Otomatis memberi peringatan <b>15 menit sebelum</b> pembukaan sesi:\n"
-        "  - <b>Asia Utama Open:</b> 09:00 WIB (Notif pukul 08:45 WIB)\n"
-        "  - <b>London Open:</b> 15:00 WIB (Notif pukul 14:45 WIB)\n"
-        "  - <b>New York / US Open:</b> 20:30 WIB (Notif pukul 20:15 WIB)\n"
-        "• Otomatis memberi peringatan <b>30 &amp; 15 menit sebelum</b> rilis berita US berdampak besar (<b>CPI, PPI, NFP, FOMC, PCE, GDP</b>) agar kamu sempat mengamankan posisi atau menghapus <i>Pending Limit</i>.\n\n"
-        "<i>Pilih market untuk Sinyal Otomatis 3-TF di bawah ini:</i>"
+        "🤖 <b>SMC HYBRID ANALISIS BOT</b>\n"
+        f"🕒 Waktu Server: <b>{waktu_str}</b>\n\n"
+        "Silakan pilih market untuk analisa sinyal atau cek kondisi makro pasar:"
     )
+
+
+def method_menu(symbol):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⚡ Scalping (H1 • M30 • M15)", callback_data=f"run_{symbol}_SCALPING")],
+        [InlineKeyboardButton("🏛️ Intra Day (D1 • H4 • H1)", callback_data=f"run_{symbol}_INTRADAY")],
+        [InlineKeyboardButton("🔙 Kembali ke Menu", callback_data="menu")]
+    ])
+
+
+def signal_result_menu(symbol, mode):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔄 Refresh Analisa", callback_data=f"run_{symbol}_{mode}"),
+            InlineKeyboardButton("🔁 Ganti Metode", callback_data=f"market_{symbol}")
+        ],
+        [InlineKeyboardButton("🏠 Kembali ke Menu", callback_data="menu")]
+    ])
+
+
+def info_menu(refresh_action):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔄 Refresh Data", callback_data=refresh_action),
+            InlineKeyboardButton("🏠 Kembali ke Menu", callback_data="menu")
+        ]
+    ])
 
 
 def admin_panel_menu():
@@ -191,14 +120,12 @@ def build_admin_panel_text():
     expired = len(USERS_DB["members"]) - aktif
     contact_disp = f"@{USERS_DB['admin_username']}" if USERS_DB["admin_username"] else "(Belum diatur)"
     mode_str = "🟢 GRATIS SEMUA (Semua fitur terbuka bebas)" if is_free_mode() else f"🔒 KHUSUS VIP (Trial gratis: {USERS_DB['trial_limit']}x)"
-    sub_count = len(USERS_DB["signal_subs"])
 
     return (
         "👑 <b>PANEL ADMIN BOT SMC</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"• Status Akses Bot: <b>{mode_str}</b>\n"
         f"• Member VIP Aktif: <b>{aktif}</b> | Expired: <b>{expired}</b>\n"
-        f"• Pelanggan Sinyal Otomatis: <b>{sub_count} user</b>\n"
         f"• Kontak Admin: <b>{html.escape(contact_disp)}</b>\n\n"
         "📋 <b>PERINTAH KELOLA MEMBER:</b>\n"
         "• <code>/add ID HARI NAMA</code> — Tambah member VIP\n"
@@ -206,29 +133,18 @@ def build_admin_panel_text():
         "• <code>/cekuser ID</code> — Cek detail user\n"
         "• <code>/hapus ID</code> — Hapus member\n"
         "• <code>/listuser</code> — Daftar semua member\n"
-        "• <code>/settrial JUMLAH</code> — Atur jatah trial saat Mode VIP aktif\n"
+        "• <code>/settrial JUMLAH</code> — Atur jatah trial\n"
         "• <code>/setcontact USERNAME</code> — Atur kontak tombol aktivasi"
     )
-
-
-def info_menu(refresh_action):
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🔄 Refresh Data", callback_data=refresh_action),
-            InlineKeyboardButton("🏠 Menu Utama", callback_data="menu")
-        ]
-    ])
 
 
 def help_menu():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🥇 Analisa XAUUSD", callback_data="market_XAUUSD"),
+            InlineKeyboardButton("🪙 Analisa XAUUSD", callback_data="market_XAUUSD"),
             InlineKeyboardButton("₿ Analisa BTCUSD", callback_data="market_BTCUSD")
         ],
-        [InlineKeyboardButton("🗺️ Mapping Market", callback_data="map_menu")],
-        [InlineKeyboardButton("🔔 Atur Sinyal Otomatis", callback_data="sig_menu")],
-        [InlineKeyboardButton("🏠 Kembali ke Menu Utama", callback_data="menu")]
+        [InlineKeyboardButton("🏠 Kembali ke Menu", callback_data="menu")]
     ])
 
 
@@ -236,22 +152,20 @@ def build_help_text(user_id):
     text = (
         "📖 <b>PANDUAN &amp; DAFTAR PERINTAH BOT</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "<b>1️⃣ PERINTAH UTAMA:</b>\n"
-        "• <code>/start</code> — Membuka menu utama bot.\n"
-        "• <code>/menu</code> — Menampilkan tombol pilihan market &amp; berita.\n"
-        "• <code>/status</code> — Cek status akses, langganan sinyal &amp; profil risiko.\n"
+        "<b>1️⃣ METODE ANALISA SINYAL:</b>\n"
+        "• <b>Scalping (H1 • M30 • M15):</b> Analisa gabungan 3 timeframe untuk eksekusi cepat.\n"
+        "• <b>Intra Day (D1 • H4 • H1):</b> Analisa gabungan 3 timeframe untuk target harian lebih lebar.\n\n"
+        "<b>2️⃣ PERINTAH UTAMA:</b>\n"
+        "• <code>/start</code> atau <code>/menu</code> — Membuka menu utama bot.\n"
+        "• <code>/status</code> — Cek status akses akun &amp; profil risiko.\n"
         "• <code>/panduan</code> — Membuka halaman panduan ini.\n\n"
-        "<b>2️⃣ FITUR ANALISA &amp; MAPPING:</b>\n"
-        "• <b>Mapping Market:</b> Menggambar peta struktur SMC real-time (OB, FVG, SND, RBR/DBD, BSL/SSL &amp; zona Pending Limit).\n"
-        "• <b>Confluence Pro (6 TF):</b> Menggabungkan analisa <b>H4 + H1 + M30 + M15 + M5 + M1</b>.\n"
-        "• <b>Sinyal &amp; Peringatan Otomatis:</b> Notifikasi otomatis saat H1+M15+M5 searah, serta peringatan otomatis menjelang buka sesi Asia (09:00), London (15:00), NY (20:30 WIB) &amp; rilis news CPI/PPI/NFP/FOMC.\n\n"
-        "<b>3️⃣ KALKULATOR LOT OTOMATIS:</b>\n"
-        "• <code>/setrisk 500 1</code>\n"
-        "  <i>Mengatur modal $500 dengan risiko 1% per entry.</i>\n\n"
-        "<b>4️⃣ ALERT HARGA PRIBADI (WATCHLIST):</b>\n"
+        "<b>3️⃣ KALKULATOR LOT &amp; RISIKO:</b>\n"
+        "• <code>/setrisk 500 2</code> — Simpan profil modal $500 &amp; risiko 2% (muncul otomatis di setiap sinyal).\n"
+        "• <code>/lot XAUUSD 200 2 5</code> — Hitung lot cepat (Market, Modal, Risiko%, Jarak SL).\n\n"
+        "<b>4️⃣ ALERT HARGA PRIBADI:</b>\n"
         "• <code>/alert XAUUSD 2650.50</code> — Pasang pengingat harga.\n"
-        "• <code>/myalert</code> — Lihat daftar alert harga aktif.\n"
-        "• <code>/delalert</code> — Hapus semua alert harga."
+        "• <code>/myalert</code> — Lihat daftar alert aktif.\n"
+        "• <code>/delalert</code> — Hapus semua alert."
     )
 
     if is_admin(user_id):
@@ -276,11 +190,11 @@ def build_help_text(user_id):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    allowed, role, status_info = check_user_access(user.id)
+    allowed, role, _ = check_user_access(user.id)
 
     if not USERS_DB["admin_ids"]:
         await update.message.reply_html(
-            "🤖 <b>MASTER SMC SCALPING BOT</b>\n\n"
+            "🤖 <b>SMC HYBRID ANALISIS BOT</b>\n\n"
             "⚠️ <b>Admin belum diklaim.</b>\n"
             f"ID Telegram kamu: <code>{user.id}</code>\n\n"
             "Ketik <code>/claimadmin</code> sekarang untuk mengunci akunmu sebagai <b>Admin Utama</b>."
@@ -292,16 +206,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_html(text, reply_markup=markup)
         return
 
-    admin_hint = "\n👑 Ketik /admin untuk buka panel kontrol & pengaturan mode Gratis/VIP." if role == "ADMIN" else ""
+    admin_hint = "\n\n👑 <i>Ketik /admin untuk buka panel kontrol &amp; mode Gratis/VIP.</i>" if role == "ADMIN" else ""
     await update.message.reply_html(
-        "🤖 <b>MASTER SMC SCALPING BOT PRO</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        f"🆔 ID Kamu: <code>{user.id}</code>\n"
-        f"📌 Status: <b>{html.escape(status_info)}</b>\n\n"
-        "• <b>7 Metode Murni SMC + Mapping Struktur Real-Time</b>\n"
-        "• <b>Multi-TF Confluence (6 TF):</b> H4 + H1 + M30 + M15 + M5 + M1\n"
-        "• <b>Peringatan Otomatis:</b> Buka Sesi Asia/London/NY &amp; News CPI/PPI/NFP/FOMC"
-        f"{admin_hint}",
+        build_main_menu_text() + admin_hint,
         reply_markup=main_menu()
     )
 
@@ -313,15 +220,12 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text, markup = build_locked_message_and_markup(user)
         await update.message.reply_html(text, reply_markup=markup)
         return
-    await update.message.reply_text("Pilih menu:", reply_markup=main_menu())
+    await update.message.reply_html(build_main_menu_text(), reply_markup=main_menu())
 
 
 async def panduan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    await update.message.reply_html(
-        build_help_text(user.id),
-        reply_markup=help_menu()
-    )
+    await update.message.reply_html(build_help_text(user.id), reply_markup=help_menu())
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -329,7 +233,6 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _, _, user_status = check_user_access(user.id)
     risk = get_user_risk_profile(user.id)
     risk_str = f"Modal ${risk['balance']:,.0f} | Risk {risk['risk_pct']:.1f}%" if risk else "Belum diatur (/setrisk)"
-    sig_sub = get_user_signal_sub(user.id)
 
     ai_status = f"Aktif (...{GEMINI_API_KEY[-4:]})" if GEMINI_API_KEY else "Tidak Terdeteksi"
     gh_status = "Aktif (Auto-Commit)" if (GITHUB_TOKEN and GITHUB_REPOSITORY) else "Lokal Saja"
@@ -339,11 +242,11 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"🆔 ID Kamu: <code>{user.id}</code>\n"
         f"👤 Akses: <b>{html.escape(user_status)}</b>\n"
-        f"🔔 Sinyal Otomatis (3-TF): <b>{sig_sub}</b>\n"
-        f"💼 Profil Lot: <b>{risk_str}</b>\n"
+        f"🧮 Profil Lot: <b>{risk_str}</b>\n"
         f"⏰ Alert Harga Aktif: <b>{len(get_user_alerts(user.id))}/5</b>\n"
         f"🤖 Gemini AI: <b>{ai_status}</b>\n"
-        f"☁️ Sync GitHub: <b>{gh_status}</b>"
+        f"☁️ Sync GitHub: <b>{gh_status}</b>",
+        reply_markup=main_menu()
     )
 
 
@@ -358,8 +261,8 @@ async def cmd_set_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args or []
     if len(args) < 2:
         await update.message.reply_html(
-            "⚠️ Format salah.\nContoh: <code>/setrisk 500 1</code>\n"
-            "<i>(Artinya modal $500 dengan risiko 1% per transaksi)</i>"
+            "⚠️ Format salah.\nContoh: <code>/setrisk 500 2</code>\n"
+            "<i>(Artinya modal $500 dengan risiko 2% per transaksi)</i>"
         )
         return
 
@@ -376,12 +279,50 @@ async def cmd_set_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     risk_usd = balance * (risk_pct / 100.0)
 
     await update.message.reply_html(
-        "💼 <b>PROFIL KALKULATOR LOT DISIMPAN</b>\n"
+        "🧮 <b>PROFIL KALKULATOR LOT DISIMPAN</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"• Modal Akun: <b>${balance:,.2f}</b>\n"
         f"• Risiko per Entry: <b>{risk_pct:.1f}% (${risk_usd:,.2f})</b>\n"
         f"• Status: <i>{html.escape(sync_msg)}</i>\n\n"
-        "Sekarang setiap laporan analisa SMC akan otomatis menampilkan ukuran Lot rekomendasi."
+        "Sekarang setiap hasil analisa XAUUSD &amp; BTCUSD akan otomatis menampilkan ukuran Lot rekomendasi."
+    )
+
+
+async def cmd_calc_lot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args or []
+    if len(args) < 4:
+        await update.message.reply_html(
+            "⚠️ Format salah.\n"
+            "Ketik: <code>/lot MARKET MODAL RISIKO% JARAK_SL</code>\n"
+            "Contoh: <code>/lot XAUUSD 200 2 5</code>"
+        )
+        return
+
+    sym = args[0].strip().upper()
+    if sym not in MARKETS:
+        await update.message.reply_text("⚠️ Market harus XAUUSD atau BTCUSD.")
+        return
+
+    try:
+        bal = float(args[1].replace(",", ""))
+        rp = float(args[2].replace("%", ""))
+        sl_pts = float(args[3].replace(",", ""))
+        if bal <= 0 or rp <= 0 or sl_pts <= 0:
+            raise ValueError()
+    except ValueError:
+        await update.message.reply_text("⚠️ Pastikan modal, risiko%, dan jarak SL berupa angka positif.")
+        return
+
+    lot, actual_loss, risk_usd, over_risk = calculate_lot_for_pair(sym, bal, rp, sl_pts)
+    warn_txt = "\n⚠️ <i>Catatan: Lot minimum 0.01 melebihi batas risiko idealmu.</i>" if over_risk else ""
+
+    await update.message.reply_html(
+        f"🧮 <b>HASIL HITUNG LOT — {sym}</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"• Modal: <b>${bal:,.2f}</b> | Batas Risiko: <b>{rp:.1f}% (${risk_usd:,.2f})</b>\n"
+        f"• Jarak Stop Loss: <b>{sl_pts} poin</b>\n"
+        f"• Ukuran Lot Aman: <b>{lot:.2f} Lot</b> (Estimasi SL: -${actual_loss:,.2f})"
+        f"{warn_txt}"
     )
 
 
@@ -429,8 +370,7 @@ async def cmd_set_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"• Market: <b>{symbol}</b>\n"
         f"• Harga Sekarang: <b>{format_price(current_price)}</b>\n"
-        f"• Target Alert: <b>{format_price(target)}</b>\n\n"
-        "Bot akan mengecek harga tiap 1 menit dan mengirim notifikasi otomatis saat target tersentuh."
+        f"• Target Alert: <b>{format_price(target)}</b>"
     )
 
 
@@ -488,11 +428,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Perintah ini khusus Admin.")
         return
-
-    await update.message.reply_html(
-        build_admin_panel_text(),
-        reply_markup=admin_panel_menu()
-    )
+    await update.message.reply_html(build_admin_panel_text(), reply_markup=admin_panel_menu())
 
 
 async def cmd_add_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -674,7 +610,7 @@ async def cmd_set_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# CALLBACK HANDLER
+# CALLBACK HANDLER (MENU & ANALISA)
 # ============================================================
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -687,394 +623,200 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not is_admin(user.id):
             return
         await asyncio.to_thread(toggle_free_mode)
-        await query.message.edit_text(
-            build_admin_panel_text(),
-            parse_mode="HTML",
-            reply_markup=admin_panel_menu()
-        )
+        await query.message.edit_text(build_admin_panel_text(), parse_mode="HTML", reply_markup=admin_panel_menu())
         return
 
     if data == "admin_refresh":
         if not is_admin(user.id):
             return
-        await query.message.edit_text(
-            build_admin_panel_text(),
-            parse_mode="HTML",
-            reply_markup=admin_panel_menu()
-        )
+        await query.message.edit_text(build_admin_panel_text(), parse_mode="HTML", reply_markup=admin_panel_menu())
         return
 
     if data == "help_commands":
-        await query.message.reply_html(
-            build_help_text(user.id),
-            reply_markup=help_menu()
-        )
+        await query.message.edit_text(build_help_text(user.id), parse_mode="HTML", reply_markup=help_menu())
         return
 
     if data == "check_my_status":
         allowed, _, status_info = check_user_access(user.id)
         if allowed:
-            sub_status = get_user_signal_sub(user.id)
-            await query.message.reply_html(
-                f"✅ <b>AKSES AKTIF</b>\n"
+            risk = get_user_risk_profile(user.id)
+            risk_str = f"Modal ${risk['balance']:,.0f} | Risk {risk['risk_pct']:.1f}%" if risk else "Belum diatur (/setrisk)"
+            await query.message.edit_text(
+                f"👤 <b>STATUS AKUN KAMU</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
                 f"🆔 ID Kamu: <code>{user.id}</code>\n"
                 f"📌 Status: <b>{html.escape(status_info)}</b>\n"
-                f"🔔 Sinyal Otomatis (3-TF): <b>{sub_status}</b>",
-                reply_markup=main_menu()
+                f"🧮 Profil Lot: <b>{risk_str}</b>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Kembali ke Menu", callback_data="menu")]])
             )
         else:
             text, markup = build_locked_message_and_markup(user)
-            await query.message.reply_html(text, reply_markup=markup)
+            await query.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
         return
 
     if data == "menu":
         allowed, _, _ = check_user_access(user.id)
         if not allowed:
             text, markup = build_locked_message_and_markup(user)
-            await query.message.reply_html(text, reply_markup=markup)
+            await query.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
             return
-        await query.message.reply_text("Pilih market:", reply_markup=main_menu())
+        await query.message.edit_text(build_main_menu_text(), parse_mode="HTML", reply_markup=main_menu())
         return
 
-    if data == "sig_menu":
-        allowed, _, _ = check_user_access(user.id)
-        if not allowed:
-            text, markup = build_locked_message_and_markup(user)
-            await query.message.reply_html(text, reply_markup=markup)
-            return
-        cur_sub = get_user_signal_sub(user.id)
-        await query.message.reply_html(
-            build_signal_settings_text(user.id),
-            reply_markup=signal_settings_menu(cur_sub)
-        )
-        return
-
-    if data.startswith("sig_set_"):
-        allowed, _, _ = check_user_access(user.id)
-        if not allowed:
-            text, markup = build_locked_message_and_markup(user)
-            await query.message.reply_html(text, reply_markup=markup)
-            return
-        mode = data.replace("sig_set_", "")
-        await asyncio.to_thread(set_user_signal_sub, user.id, mode)
-        cur_sub = get_user_signal_sub(user.id)
-        await query.message.edit_text(
-            build_signal_settings_text(user.id),
-            parse_mode="HTML",
-            reply_markup=signal_settings_menu(cur_sub)
-        )
-        return
-
-    # --- ALUR MAPPING MARKET ---
-    if data == "map_menu":
-        allowed, _, _ = check_user_access(user.id)
-        if not allowed:
-            text, markup = build_locked_message_and_markup(user)
-            await query.message.reply_html(text, reply_markup=markup)
-            return
-        await query.message.reply_text(
-            "🗺️ MAPPING MARKET SMC\nPilih pair yang ingin dipetakan:",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("🥇 XAUUSD", callback_data="map_market_XAUUSD"),
-                    InlineKeyboardButton("₿ BTCUSD", callback_data="map_market_BTCUSD")
-                ],
-                [InlineKeyboardButton("🏠 Menu Utama", callback_data="menu")]
-            ])
-        )
-        return
-
-    if data.startswith("map_market_"):
-        symbol = data.replace("map_market_", "")
-        if symbol not in MARKETS:
-            return
-        rows, row = [], []
-        for tf in TIMEFRAMES:
-            row.append(InlineKeyboardButton(tf, callback_data=f"map_tf_{symbol}_{tf}"))
-            if len(row) == 3:
-                rows.append(row)
-                row = []
-        if row:
-            rows.append(row)
-        rows.append([
-            InlineKeyboardButton("⬅️ Ganti Market", callback_data="map_menu"),
-            InlineKeyboardButton("🏠 Menu Utama", callback_data="menu")
-        ])
-        await query.message.reply_text(
-            f"🗺️ Mapping {symbol}\nPilih timeframe untuk menggambar peta struktur:",
-            reply_markup=InlineKeyboardMarkup(rows)
-        )
-        return
-
-    if data.startswith("map_tf_"):
-        allowed, role, _ = check_user_access(user.id)
-        if not allowed:
-            text, markup = build_locked_message_and_markup(user)
-            await query.message.reply_html(text, reply_markup=markup)
-            return
-
-        _, _, symbol, timeframe = data.split("_")
-        if symbol not in MARKETS or timeframe not in TIMEFRAMES:
-            return
-
-        processing = await query.message.reply_text(f"🗺️ Menggambar peta struktur {symbol} ({timeframe})...")
-        try:
-            chart_buf, caption = await asyncio.to_thread(build_mapping_chart_and_caption, symbol, timeframe)
-            if role == "TRIAL":
-                await asyncio.to_thread(consume_trial_if_needed, user.id)
-            await processing.delete()
-            await query.message.reply_photo(
-                photo=chart_buf,
-                caption=caption,
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(f"🔄 Refresh Map {symbol} {timeframe}", callback_data=f"map_tf_{symbol}_{timeframe}")],
-                    [
-                        InlineKeyboardButton("⬅️ Ganti TF", callback_data=f"map_market_{symbol}"),
-                        InlineKeyboardButton("🏠 Menu Utama", callback_data="menu")
-                    ]
-                ])
-            )
-        except Exception as err:
-            await processing.edit_text(f"❌ Gagal membuat mapping:\n{str(err)[:1500]}")
-        return
-
-    # --- ALUR ANALISA SINYAL ---
+    # --- SUB-MENU PILIHAN METODE (SCALPING / INTRA DAY) ---
     if data.startswith("market_"):
+        allowed, _, _ = check_user_access(user.id)
+        if not allowed:
+            text, markup = build_locked_message_and_markup(user)
+            await query.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
+            return
+
         symbol = data.replace("market_", "")
         if symbol not in MARKETS:
             return
-        await query.message.reply_text(
-            f"Market: {symbol}\nPilih timeframe untuk analisa atau Confluence Pro (6 TF):",
-            reply_markup=timeframe_menu(symbol)
+        sym_icon = "🪙" if symbol == "XAUUSD" else "₿"
+        await query.message.edit_text(
+            f"📊 <b>MARKET TERPILIH: {sym_icon} {symbol}</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "<b>PILIHAN METODE ANALISA:</b>",
+            parse_mode="HTML",
+            reply_markup=method_menu(symbol)
         )
         return
 
-    if data.startswith("tf_") or data.startswith("analyze_"):
+    # --- EKSEKUSI ANALISA 3-TF (ANTI-WAIT) ---
+    if data.startswith("run_"):
         allowed, role, _ = check_user_access(user.id)
         if not allowed:
             text, markup = build_locked_message_and_markup(user)
-            await query.message.reply_html(text, reply_markup=markup)
+            await query.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
             return
 
-        _, symbol, timeframe = data.split("_")
-        if symbol not in MARKETS or timeframe not in TIMEFRAMES:
+        _, symbol, mode = data.split("_")
+        if symbol not in MARKETS or mode not in ("SCALPING", "INTRADAY"):
             return
 
-        processing = await query.message.reply_text(f"⏳ Menganalisis {symbol} {timeframe}...")
+        tf_desc = "H1 • M30 • M15" if mode == "SCALPING" else "D1 • H4 • H1"
+        await query.message.edit_text(
+            f"⏳ <i>Menganalisa {symbol} mode {mode} ({tf_desc})...</i>",
+            parse_mode="HTML"
+        )
+
         try:
-            result = await asyncio.to_thread(analyze_market, symbol, timeframe)
-            risk_profile = get_user_risk_profile(user.id)
-            report_text = create_report(result, risk_profile=risk_profile)
+            res = await asyncio.to_thread(analyze_hybrid_3tf, symbol, mode)
+            risk_prof = get_user_risk_profile(user.id)
+            report_text = format_hybrid_signal_report(res, risk_profile=risk_prof)
 
             if role == "TRIAL":
                 await asyncio.to_thread(consume_trial_if_needed, user.id)
                 _, _, new_status = check_user_access(user.id)
-                report_text += f"\n\n🎁 {new_status}"
+                report_text += f"\n\n🎁 <i>{html.escape(new_status)}</i>"
 
-            await processing.edit_text(report_text, reply_markup=analysis_menu(symbol, timeframe))
+            await query.message.edit_text(
+                report_text,
+                parse_mode="HTML",
+                reply_markup=signal_result_menu(symbol, mode)
+            )
         except Exception as err:
-            await processing.edit_text(f"❌ ANALISIS GAGAL:\n{str(err)[:2000]}")
+            await query.message.edit_text(
+                f"❌ <b>ANALISA GAGAL:</b>\n{html.escape(str(err)[:1500])}",
+                parse_mode="HTML",
+                reply_markup=signal_result_menu(symbol, mode)
+            )
         return
 
-    if data.startswith("conf_"):
-        allowed, role, _ = check_user_access(user.id)
+    # --- CEK USOIL & DXY ---
+    if data.startswith("macro_"):
+        allowed, _, _ = check_user_access(user.id)
         if not allowed:
             text, markup = build_locked_message_and_markup(user)
-            await query.message.reply_html(text, reply_markup=markup)
+            await query.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
             return
 
-        symbol = data.replace("conf_", "")
-        if symbol not in MARKETS:
+        parts = data.split("_")
+        symbol = parts[1]
+        force = (len(parts) > 2 and parts[2] == "refresh")
+        if symbol not in MACRO_MARKETS:
             return
 
-        processing = await query.message.reply_text(
-            f"⚡ Menjalankan Confluence Pro {symbol} (6 TF: H4 + H1 + M30 + M15 + M5 + M1)..."
-        )
+        await query.message.edit_text(f"⏳ <i>Mengambil data {symbol} terbaru...</i>", parse_mode="HTML")
         try:
-            risk_profile = get_user_risk_profile(user.id)
-            report_text = await asyncio.to_thread(analyze_confluence_pro, symbol, risk_profile)
-
-            if role == "TRIAL":
-                await asyncio.to_thread(consume_trial_if_needed, user.id)
-                _, _, new_status = check_user_access(user.id)
-                report_text += f"\n\n🎁 {new_status}"
-
-            await processing.edit_text(report_text, reply_markup=confluence_menu(symbol))
+            report = await asyncio.to_thread(get_macro_market_report, symbol, force)
+            await query.message.edit_text(
+                report,
+                parse_mode="HTML",
+                reply_markup=info_menu(f"macro_{symbol}_refresh")
+            )
         except Exception as err:
-            await processing.edit_text(f"❌ Confluence gagal:\n{str(err)[:2000]}")
+            await query.message.edit_text(
+                f"❌ <b>Gagal mengambil data {symbol}:</b>\n{html.escape(str(err)[:1500])}",
+                parse_mode="HTML",
+                reply_markup=info_menu(f"macro_{symbol}_refresh")
+            )
         return
 
+    # --- BERITA EKONOMI US (WIB) ---
     if data in ("calendar", "calendar_refresh"):
         allowed, _, _ = check_user_access(user.id)
         if not allowed:
             text, markup = build_locked_message_and_markup(user)
-            await query.message.reply_html(text, reply_markup=markup)
+            await query.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
             return
 
         force = (data == "calendar_refresh")
-        msg = await query.message.reply_text("⏳ Mengambil jadwal ekonomi US...")
+        await query.message.edit_text("⏳ <i>Mengambil jadwal berita ekonomi US (WIB)...</i>", parse_mode="HTML")
         try:
             formatted = await asyncio.to_thread(get_cached_calendar, force)
-            await msg.edit_text(formatted, parse_mode="HTML", reply_markup=info_menu("calendar_refresh"))
+            await query.message.edit_text(formatted, parse_mode="HTML", reply_markup=info_menu("calendar_refresh"))
         except Exception as err:
-            await msg.edit_text(f"❌ Kalender gagal:\n{str(err)[:2000]}", reply_markup=info_menu("calendar_refresh"))
-        return
-
-    if data in ("news", "news_refresh"):
-        allowed, _, _ = check_user_access(user.id)
-        if not allowed:
-            text, markup = build_locked_message_and_markup(user)
-            await query.message.reply_html(text, reply_markup=markup)
-            return
-
-        force = (data == "news_refresh")
-        msg = await query.message.reply_text("⏳ Membaca berita market US...")
-        try:
-            formatted = await asyncio.to_thread(get_cached_news, force)
-            await msg.edit_text(formatted, parse_mode="HTML", reply_markup=info_menu("news_refresh"))
-        except Exception as err:
-            await msg.edit_text(f"❌ Berita gagal:\n{str(err)[:2000]}", reply_markup=info_menu("news_refresh"))
-        return
-
-
-# ============================================================
-# BACKGROUND PROACTIVE ALERTS (BUKA SESI + NEWS + SINYAL 3-TF)
-# ============================================================
-
-async def check_and_send_session_warnings(application):
-    now_wib = datetime.now(WIB)
-    if now_wib.weekday() >= 5:
-        return
-
-    date_tag = now_wib.strftime("%Y%m%d")
-    hour = now_wib.hour
-    minute = now_wib.minute
-
-    session_alert = None
-
-    if hour == 8 and 45 <= minute <= 49:
-        key = f"{date_tag}_ASIA_OPEN"
-        if key not in SENT_SESSION_WARNINGS:
-            SENT_SESSION_WARNINGS.add(key)
-            session_alert = (
-                "🌏 <b>PERINGATAN PEMBUKAAN SESI ASIA UTAMA (09:00 WIB)</b>\n"
-                "━━━━━━━━━━━━━━━━━━━━\n"
-                "⏳ <b>15 Menit Lagi</b> likuiditas penuh Asia (HK/SG/Shanghai) masuk.\n\n"
-                "📌 <b>Karakteristik Sesi Asia (XAUUSD &amp; BTCUSD):</b>\n"
-                "• Volume pagi mulai terbentuk dan harga cenderung bergerak rapi di dalam <i>range</i> (pantulan OB &amp; SNR).\n"
-                "• Cocok untuk <b>Pending Limit (Buy/Sell Limit)</b> dengan target TP konservatif sebelum sesi Eropa buka."
+            await query.message.edit_text(
+                f"❌ <b>Gagal memuat berita ekonomi:</b>\n{html.escape(str(err)[:1500])}",
+                parse_mode="HTML",
+                reply_markup=info_menu("calendar_refresh")
             )
-
-    elif hour == 14 and 45 <= minute <= 49:
-        key = f"{date_tag}_LONDON_OPEN"
-        if key not in SENT_SESSION_WARNINGS:
-            SENT_SESSION_WARNINGS.add(key)
-            session_alert = (
-                "⚠️ <b>PERINGATAN PEMBUKAAN SESI LONDON (15:00 WIB)</b>\n"
-                "━━━━━━━━━━━━━━━━━━━━\n"
-                "⏳ <b>15 Menit Lagi</b> sesi Eropa/London dibuka.\n\n"
-                "📌 <b>Saran Pengamanan (XAUUSD &amp; BTCUSD):</b>\n"
-                "• Volume transaksi institusi mulai melonjak dan sering terjadi sapuan ekor (<i>Liquidity Sweep</i>).\n"
-                "• Pertimbangkan <b>hapus sementara Pending Limit</b> yang terlalu dekat dengan harga berjalan.\n"
-                "• Tunggu konfirmasi rejection candle M1/M5 sebelum masuk posisi baru."
-            )
-
-    elif hour == 20 and 15 <= minute <= 19:
-        key = f"{date_tag}_NY_OPEN"
-        if key not in SENT_SESSION_WARNINGS:
-            SENT_SESSION_WARNINGS.add(key)
-            session_alert = (
-                "🚨 <b>PERINGATAN PEMBUKAAN SESI NEW YORK / US (20:30 WIB)</b>\n"
-                "━━━━━━━━━━━━━━━━━━━━\n"
-                "⏳ <b>15 Menit Lagi</b> sesi Amerika dibuka (Prime Killzone).\n\n"
-                "📌 <b>Saran Pengamanan (XAUUSD &amp; BTCUSD):</b>\n"
-                "• Ini adalah jam dengan volatilitas tertinggi harian—zona struktur sering dijebol cepat.\n"
-                "• <b>Amankan posisi profit</b> (geser SL ke titik impas/BEP) dan <b>batalkan Pending Limit tanpa konfirmasi</b>.\n"
-                "• Tunggu arah struktur stabil 15–30 menit setelah sesi US buka."
-            )
-
-    if session_alert:
-        recipients = get_all_warning_recipients()
-        for uid in recipients:
-            try:
-                await application.bot.send_message(
-                    chat_id=uid,
-                    text=session_alert,
-                    parse_mode="HTML",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("📅 Cek Jadwal News US Hari Ini", callback_data="calendar")]
-                    ])
-                )
-            except Exception:
-                pass
-
-
-async def check_and_send_news_warnings(application):
-    try:
-        events = await asyncio.to_thread(get_upcoming_high_impact_us_events, 35)
-    except Exception as err:
-        log.warning("Cek news warning gagal: %s", err)
         return
 
-    if not events:
-        return
-
-    recipients = get_all_warning_recipients()
-    if not recipients:
-        return
-
-    for ev in events:
-        mins = ev["minutes_left"]
-        if 26 <= mins <= 35:
-            stage = "30M"
-        elif 10 <= mins <= 18:
-            stage = "15M"
-        else:
-            continue
-
-        warn_key = f"{ev['key']}_{stage}"
-        if warn_key in SENT_NEWS_WARNINGS:
-            continue
-
-        SENT_NEWS_WARNINGS.add(warn_key)
-
-        msg = (
-            "🚨 <b>PERINGATAN BERITA BESAR US (HIGH IMPACT)</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            f"📰 Berita: <b>{html.escape(ev['title'])}</b>\n"
-            f"🕒 Jadwal Rilis: <b>{html.escape(ev['time_wib'])}</b> (<b>±{mins} menit lagi</b>)\n"
-            f"📊 Perkiraan: <b>{html.escape(ev['forecast'])}</b> | Lalu: <b>{html.escape(ev['previous'])}</b>\n\n"
-            "⚠️ <b>Tindakan Wajib Trader XAUUSD &amp; BTCUSD:</b>\n"
-            "• Harga emas &amp; kripto berpotensi bergerak liar puluhan hingga ratusan pips dalam hitungan detik.\n"
-            "• <b>Hapus semua Pending Order (Buy Limit / Sell Limit)</b> sebelum rilis.\n"
-            "• Amankan SL posisi yang sedang berjalan atau tutup posisi sebelum berita keluar."
+    # --- SESI MARKET (WIB) ---
+    if data in ("session_wib", "session_wib_refresh"):
+        await query.message.edit_text(
+            build_session_report(),
+            parse_mode="HTML",
+            reply_markup=info_menu("session_wib_refresh")
         )
+        return
 
-        for uid in recipients:
-            try:
-                await application.bot.send_message(
-                    chat_id=uid,
-                    text=msg,
-                    parse_mode="HTML",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("📅 Lihat Panduan Arah News", callback_data="calendar")]
-                    ])
-                )
-            except Exception:
-                pass
+    # --- KALKULATOR LOT ---
+    if data == "lot_calc":
+        risk_prof = get_user_risk_profile(user.id)
+        await query.message.edit_text(
+            build_lot_calculator_guide(risk_prof),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Kembali ke Menu", callback_data="menu")]])
+        )
+        return
+
+    # --- REKAP WINRATE ---
+    if data in ("winrate", "winrate_refresh"):
+        await asyncio.to_thread(evaluate_open_signals, get_latest_price)
+        await query.message.edit_text(
+            build_winrate_report(),
+            parse_mode="HTML",
+            reply_markup=info_menu("winrate_refresh")
+        )
+        return
 
 
-async def background_scanner_and_alerts(application):
-    await asyncio.sleep(15)
+# ============================================================
+# BACKGROUND TASK (PRICE ALERT & WINRATE EVALUATOR)
+# ============================================================
+
+async def background_monitor(application):
+    await asyncio.sleep(20)
     tick = 0
-
     while True:
         try:
-            await check_and_send_session_warnings(application)
-
-            if tick % 3 == 0:
-                await check_and_send_news_warnings(application)
-
+            # 1. Cek Price Alert Pribadi User tiap 1 menit
             if USERS_DB["price_alerts"]:
                 latest_prices = {}
                 for sym in MARKETS:
@@ -1104,12 +846,11 @@ async def background_scanner_and_alerts(application):
                                     f"🔔 <b>ALERT HARGA TERSENTUH — {sym}</b>\n"
                                     f"━━━━━━━━━━━━━━━━━━━━\n"
                                     f"• Target Alert: <b>{format_price(target)}</b>\n"
-                                    f"• Harga Saat Ini: <b>{format_price(cur)}</b>\n\n"
-                                    f"Tekan tombol di bawah untuk langsung analisa 6 TF:"
+                                    f"• Harga Saat Ini: <b>{format_price(cur)}</b>"
                                 ),
                                 parse_mode="HTML",
                                 reply_markup=InlineKeyboardMarkup([
-                                    [InlineKeyboardButton(f"⚡ Confluence Pro {sym} (6 TF)", callback_data=f"conf_{sym}")]
+                                    [InlineKeyboardButton(f"⚡ Analisa {sym} Sekarang", callback_data=f"market_{sym}")]
                                 ])
                             )
                         except Exception:
@@ -1121,37 +862,12 @@ async def background_scanner_and_alerts(application):
                     ]
                     await asyncio.to_thread(sync_users)
 
-            if tick % 10 == 0:
-                for sym in MARKETS:
-                    recipients = get_signal_subscribers_for(sym)
-                    if not recipients:
-                        continue
-                    try:
-                        bundle = await asyncio.to_thread(check_triple_tf_signal, sym)
-                        if bundle:
-                            m5_res = bundle["m5"]
-                            sig_key = f"{sym}_{bundle['direction']}_{round(m5_res['entry_low'], 1)}"
-                            if LAST_BROADCAST_SIGNALS.get(sym) != sig_key:
-                                LAST_BROADCAST_SIGNALS[sym] = sig_key
-                                for uid in recipients:
-                                    try:
-                                        risk_prof = get_user_risk_profile(uid)
-                                        msg_text = format_auto_signal_alert(bundle, risk_profile=risk_prof)
-                                        await application.bot.send_message(
-                                            chat_id=uid,
-                                            text=msg_text,
-                                            reply_markup=InlineKeyboardMarkup([
-                                                [InlineKeyboardButton(f"⚡ Cek Confluence 6-TF {sym}", callback_data=f"conf_{sym}")],
-                                                [InlineKeyboardButton("🔔 Atur Notifikasi Sinyal", callback_data="sig_menu")]
-                                            ])
-                                        )
-                                    except Exception:
-                                        pass
-                    except Exception as scan_err:
-                        log.warning("Auto-Scanner 3-TF %s error: %s", sym, scan_err)
+            # 2. Update status TP1/TP2/TP3/SL untuk Rekap Winrate tiap 5 menit
+            if tick % 5 == 0:
+                await asyncio.to_thread(evaluate_open_signals, get_latest_price)
 
-        except Exception as loop_err:
-            log.error("Background loop error: %s", loop_err)
+        except Exception as err:
+            log.warning("Background monitor warning: %s", err)
 
         tick += 1
         await asyncio.sleep(60)
@@ -1167,11 +883,10 @@ async def error_handler(update, context):
 
 async def post_init(application):
     log.info("======================================")
-    log.info("MASTER SMC SCALPING BOT PRO STARTED")
+    log.info("SMC HYBRID ANALISIS BOT STARTED (WIB)")
     log.info("Free Mode: %s | Admin IDs: %s", is_free_mode(), USERS_DB["admin_ids"])
-    log.info("Winter Time Alerts: Asia 09:00, London 15:00, NY 20:30 WIB")
     log.info("======================================")
-    asyncio.create_task(background_scanner_and_alerts(application))
+    asyncio.create_task(background_monitor(application))
 
 
 def main():
@@ -1180,6 +895,7 @@ def main():
         sys.exit(1)
 
     load_users_db()
+    load_signals_db()
 
     application = (
         Application.builder()
@@ -1194,6 +910,7 @@ def main():
     application.add_handler(CommandHandler("help", panduan_command))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("setrisk", cmd_set_risk))
+    application.add_handler(CommandHandler("lot", cmd_calc_lot))
     application.add_handler(CommandHandler("alert", cmd_set_alert))
     application.add_handler(CommandHandler("myalert", cmd_my_alerts))
     application.add_handler(CommandHandler("delalert", cmd_del_alerts))
