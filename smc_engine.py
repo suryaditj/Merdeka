@@ -113,7 +113,7 @@ def get_latest_price(symbol):
 
 
 # ============================================================
-# HELPER STATISTIK & STRUKTUR SMC PER TIMEFRAME
+# HELPER STATISTIK & PEMBACAAN STRUKTUR SMC ASLI
 # ============================================================
 
 def _calc_avg_range(candles, period=20):
@@ -124,17 +124,12 @@ def _calc_avg_range(candles, period=20):
     return avg
 
 
-def _evaluate_tf_structure(candles):
-    """
-    Menganalisa arah tren (Bullish/Bearish) dan mencari zona OB/FVG/Supply/Demand terdekat
-    pada satu timeframe tanpa menghasilkan nilai netral/kosong.
-    """
+def _evaluate_tf_bias(candles):
+    """Menentukan bias arah tren murni (Bullish / Bearish) dari struktur & sweep."""
     price = candles[-1]["close"]
-    avg_range = _calc_avg_range(candles, 20)
     lookback = candles[:-1] if len(candles) > 10 else candles
-
-    # 1. Cek BOS (Break of Structure) & EMA-like Midpoint Trend
     recent_20 = lookback[-20:] if len(lookback) >= 20 else lookback
+
     swing_high = max(c["high"] for c in recent_20)
     swing_low = min(c["low"] for c in recent_20)
     mid_range = (swing_high + swing_low) / 2.0
@@ -142,13 +137,8 @@ def _evaluate_tf_structure(candles):
     ema_fast = sum(c["close"] for c in candles[-8:]) / min(8, len(candles))
     ema_slow = sum(c["close"] for c in candles[-21:]) / min(21, len(candles))
 
-    bull_score = 0
-    bear_score = 0
-
-    if price > ema_fast:
-        bull_score += 1
-    else:
-        bear_score += 1
+    bull_score = 1 if price > ema_fast else 0
+    bear_score = 1 if price <= ema_fast else 0
 
     if ema_fast >= ema_slow:
         bull_score += 2
@@ -160,7 +150,6 @@ def _evaluate_tf_structure(candles):
     else:
         bear_score += 1
 
-    # Cek Sweep Likuiditas 5 candle terakhir
     prior = lookback[-30:-5] if len(lookback) >= 30 else lookback[:-5]
     if prior:
         p_high = max(c["high"] for c in prior)
@@ -172,166 +161,205 @@ def _evaluate_tf_structure(candles):
         elif swept_high and not swept_low:
             bear_score += 2
 
-    bias = "Bullish" if bull_score >= bear_score else "Bearish"
+    return "Bullish" if bull_score >= bear_score else "Bearish"
 
-    # 2. Cari Zona Supply/OB Bearish (untuk SELL) & Demand/OB Bullish (untuk BUY)
-    sell_zone = None
-    buy_zone = None
 
-    for i in range(len(lookback) - 2, max(1, len(lookback) - 55), -1):
-        c = lookback[i]
-        c1 = lookback[i + 1]
-        c1_rng = c1["high"] - c1["low"]
-        if c1_rng <= 0:
-            continue
+def _find_nearest_unmitigated_zone(candles, direction, max_dist, max_sl_dist):
+    """
+    Mencari struktur SMC asli terdekat yang masih segar (Unmitigated):
+    Urutan prioritas: Order Block (OB) -> Fair Value Gap (FVG) -> Swing High/Low Valid.
+    SL ditempatkan langsung di balik ekor (wick) struktur tersebut + buffer tipis.
+    """
+    price = candles[-1]["close"]
+    lookback = candles[:-1]
+    avg_rng = _calc_avg_range(candles, 20)
+    wick_buffer = max(avg_rng * 0.25, price * 0.00025)
 
-        # Bearish OB / Supply
-        if sell_zone is None and c["close"] > c["open"] and c1["close"] < c["low"] and (c1["open"] - c1["close"]) >= c1_rng * 0.45:
-            z_low, z_high = c["low"], c["high"]
-            invalidated = any(lookback[k]["close"] > z_high + avg_range * 0.3 for k in range(i + 2, len(lookback)))
-            if not invalidated and z_high >= price - avg_range * 0.4:
-                sell_zone = ("Order Block / Supply", z_low, z_high)
+    candidates = []
 
-        # Bullish OB / Demand
-        if buy_zone is None and c["close"] < c["open"] and c1["close"] > c["high"] and (c1["close"] - c1["open"]) >= c1_rng * 0.45:
-            z_low, z_high = c["low"], c["high"]
-            invalidated = any(lookback[k]["close"] < z_low - avg_range * 0.3 for k in range(i + 2, len(lookback)))
-            if not invalidated and z_low <= price + avg_range * 0.4:
-                buy_zone = ("Order Block / Demand", z_low, z_high)
+    if direction == "SELL":
+        # 1. Cari Bearish Order Block segar di atas harga sekarang
+        for i in range(len(lookback) - 2, max(1, len(lookback) - 45), -1):
+            c = lookback[i]
+            c1 = lookback[i + 1]
+            c1_rng = c1["high"] - c1["low"]
+            if c1_rng <= 0:
+                continue
+            if c["close"] > c["open"] and c1["close"] < c["low"] and (c1["open"] - c1["close"]) >= c1_rng * 0.45:
+                z_low, z_high = c["low"], max(c["high"], c1["high"])
+                dist = z_low - price
+                if -wick_buffer <= dist <= max_dist:
+                    invalidated = any(lookback[k]["close"] > z_high for k in range(i + 2, len(lookback)))
+                    if not invalidated:
+                        sl = z_high + wick_buffer
+                        if (sl - z_low) <= max_sl_dist:
+                            candidates.append((abs(dist), "Bearish Order Block", z_low, z_high, sl))
 
-        if sell_zone and buy_zone:
-            break
-
-    # Cek FVG segar jika OB belum ditemukan
-    if sell_zone is None or buy_zone is None:
-        for i in range(len(lookback) - 1, max(2, len(lookback) - 45), -1):
+        # 2. Cari Bearish FVG segar di atas harga sekarang
+        for i in range(len(lookback) - 1, max(2, len(lookback) - 40), -1):
             c1 = lookback[i - 2]
             c3 = lookback[i]
-            if sell_zone is None and c3["high"] < c1["low"]:
+            if c3["high"] < c1["low"]:
                 g_low, g_high = c3["high"], c1["low"]
-                filled = any(lookback[k]["close"] > g_high for k in range(i + 1, len(lookback)))
-                if not filled and g_high >= price - avg_range * 0.3:
-                    sell_zone = ("FVG / Imbalance", g_low, g_high)
-            if buy_zone is None and c3["low"] > c1["high"]:
+                dist = g_low - price
+                if -wick_buffer <= dist <= max_dist:
+                    filled = any(lookback[k]["close"] > g_high for k in range(i + 1, len(lookback)))
+                    if not filled:
+                        sl = max(g_high, c1["high"]) + wick_buffer
+                        if (sl - g_low) <= max_sl_dist:
+                            candidates.append((abs(dist), "Bearish FVG", g_low, g_high, sl))
+
+        # 3. Cari Swing High terdekat (BSL / Resistance Struktur)
+        for i in range(len(lookback) - 3, max(2, len(lookback) - 30), -1):
+            h = lookback[i]["high"]
+            if h >= lookback[i - 1]["high"] and h > lookback[i + 1]["high"]:
+                dist = h - price
+                if 0 <= dist <= max_dist:
+                    z_low = max(lookback[i]["open"], lookback[i]["close"])
+                    z_high = h
+                    sl = z_high + wick_buffer
+                    if (sl - z_low) <= max_sl_dist:
+                        candidates.append((dist + avg_rng * 0.1, "Swing High / Supply", z_low, z_high, sl))
+
+    else:  # BUY
+        # 1. Cari Bullish Order Block segar di bawah harga sekarang
+        for i in range(len(lookback) - 2, max(1, len(lookback) - 45), -1):
+            c = lookback[i]
+            c1 = lookback[i + 1]
+            c1_rng = c1["high"] - c1["low"]
+            if c1_rng <= 0:
+                continue
+            if c["close"] < c["open"] and c1["close"] > c["high"] and (c1["close"] - c1["open"]) >= c1_rng * 0.45:
+                z_low, z_high = min(c["low"], c1["low"]), c["high"]
+                dist = price - z_high
+                if -wick_buffer <= dist <= max_dist:
+                    invalidated = any(lookback[k]["close"] < z_low for k in range(i + 2, len(lookback)))
+                    if not invalidated:
+                        sl = z_low - wick_buffer
+                        if (z_high - sl) <= max_sl_dist:
+                            candidates.append((abs(dist), "Bullish Order Block", z_low, z_high, sl))
+
+        # 2. Cari Bullish FVG segar di bawah harga sekarang
+        for i in range(len(lookback) - 1, max(2, len(lookback) - 40), -1):
+            c1 = lookback[i - 2]
+            c3 = lookback[i]
+            if c3["low"] > c1["high"]:
                 g_low, g_high = c1["high"], c3["low"]
-                filled = any(lookback[k]["close"] < g_low for k in range(i + 1, len(lookback)))
-                if not filled and g_low <= price + avg_range * 0.3:
-                    buy_zone = ("FVG / Imbalance", g_low, g_high)
-            if sell_zone and buy_zone:
-                break
+                dist = price - g_high
+                if -wick_buffer <= dist <= max_dist:
+                    filled = any(lookback[k]["close"] < g_low for k in range(i + 1, len(lookback)))
+                    if not filled:
+                        sl = min(g_low, c1["low"]) - wick_buffer
+                        if (g_high - sl) <= max_sl_dist:
+                            candidates.append((abs(dist), "Bullish FVG", g_low, g_high, sl))
 
-    # Fallback jika struktur sangat satu arah (menggunakan swing high/low terdekat)
-    if sell_zone is None:
-        top = max(c["high"] for c in lookback[-18:])
-        if top < price:
-            top = price + avg_range * 0.6
-        sell_zone = ("Swing High / Supply", top - avg_range * 0.35, top)
+        # 3. Cari Swing Low terdekat (SSL / Demand Struktur)
+        for i in range(len(lookback) - 3, max(2, len(lookback) - 30), -1):
+            l = lookback[i]["low"]
+            if l <= lookback[i - 1]["low"] and l < lookback[i + 1]["low"]:
+                dist = price - l
+                if 0 <= dist <= max_dist:
+                    z_low = l
+                    z_high = min(lookback[i]["open"], lookback[i]["close"])
+                    sl = z_low - wick_buffer
+                    if (z_high - sl) <= max_sl_dist:
+                        candidates.append((dist + avg_rng * 0.1, "Swing Low / Demand", z_low, z_high, sl))
 
-    if buy_zone is None:
-        bot = min(c["low"] for c in lookback[-18:])
-        if bot > price:
-            bot = price - avg_range * 0.6
-        buy_zone = ("Swing Low / Demand", bot, bot + avg_range * 0.35)
+    if candidates:
+        candidates.sort(key=lambda x: x[0])
+        _, label, z_low, z_high, sl = candidates[0]
+        return label, z_low, z_high, sl
 
-    return {
-        "price": price,
-        "bias": bias,
-        "avg_range": avg_range,
-        "sell_zone": sell_zone,
-        "buy_zone": buy_zone
-    }
+    return None
 
 
 # ============================================================
-# ENGINE UTAMA 3-TF ANTI-WAIT (SCALPING & INTRA DAY)
+# ENGINE UTAMA 3-TF ANTI-WAIT (ADAPTIF STRUKTUR MIKRO)
 # ============================================================
 
 def analyze_hybrid_3tf(symbol, mode):
-    """
-    Mode:
-    - SCALPING : H1 (Penentu Arah Wajib) • M30 (Penentu Zona & Angka) • M15 (Penentu Momentum)
-    - INTRADAY : D1 (Penentu Arah Wajib) • H4 (Penentu Zona & Angka) • H1 (Penentu Momentum)
-    """
     mode_key = mode.upper()
     if mode_key == "SCALPING":
         tf_high, tf_mid, tf_low = "H1", "M30", "M15"
         mode_title = "HYBRID SCALPING"
+        max_dist = 3.5 if symbol == "XAUUSD" else 250.0
+        max_sl_dist = 5.0 if symbol == "XAUUSD" else 380.0
+        exec_tfs = ["M15", "M5"]
     else:
         tf_high, tf_mid, tf_low = "D1", "H4", "H1"
         mode_title = "HYBRID INTRA DAY"
+        max_dist = 6.5 if symbol == "XAUUSD" else 500.0
+        max_sl_dist = 9.0 if symbol == "XAUUSD" else 700.0
+        exec_tfs = ["H1", "M15", "M5"]
 
     c_high = get_candles(symbol, tf_high, min_required=30)
     c_mid = get_candles(symbol, tf_mid, min_required=40)
     c_low = get_candles(symbol, tf_low, min_required=40)
 
-    info_high = _evaluate_tf_structure(c_high)
-    info_mid = _evaluate_tf_structure(c_mid)
-    info_low = _evaluate_tf_structure(c_low)
+    bias_high = _evaluate_tf_bias(c_high)
+    bias_mid = _evaluate_tf_bias(c_mid)
+    bias_low = _evaluate_tf_bias(c_low)
 
-    current_price = info_low["price"]
+    current_price = c_low[-1]["close"]
 
-    # Voting 3 TF dengan TF Tertinggi sebagai Hakim Utama (Anti-WAIT)
-    biases = [info_high["bias"], info_mid["bias"], info_low["bias"]]
-    bull_votes = biases.count("Bullish")
-    bear_votes = biases.count("Bearish")
-
-    if bull_votes >= 2 and info_high["bias"] == "Bullish":
+    biases = [bias_high, bias_mid, bias_low]
+    if biases.count("Bullish") >= 2 and bias_high == "Bullish":
         direction = "BUY"
-    elif bear_votes >= 2 and info_high["bias"] == "Bearish":
+    elif biases.count("Bearish") >= 2 and bias_high == "Bearish":
         direction = "SELL"
     else:
-        # Jika TF menengah/kecil bertabrakan, ikuti arah wajib TF Tertinggi
-        direction = "BUY" if info_high["bias"] == "Bullish" else "SELL"
+        direction = "BUY" if bias_high == "Bullish" else "SELL"
 
-    # Ambil angka Entry, SL, TP dari TF Tengah (M30 untuk Scalping, H4 untuk Intra Day)
-    avg_rng = info_mid["avg_range"]
+    # Cari struktur SMC asli terdekat; jika di TF eksekusi terlalu lebar, turun ke TF mikro di bawahnya
+    found_zone = None
+    used_tf = tf_low
+    tf_candles_map = {tf_low: c_low}
+
+    for etf in exec_tfs:
+        if etf not in tf_candles_map:
+            tf_candles_map[etf] = get_candles(symbol, etf, min_required=40)
+        res_z = _find_nearest_unmitigated_zone(tf_candles_map[etf], direction, max_dist, max_sl_dist)
+        if res_z is not None:
+            found_zone = res_z
+            used_tf = etf
+            break
+
+    # Fallback jika market sedang breakout kencang tanpa zona pullback di atas/bawah: gunakan ekor candle mikro terakhir
+    if found_zone is not None:
+        z_name, entry_low, entry_high, sl = found_zone
+    else:
+        micro_c = tf_candles_map[exec_tfs[-1]]
+        used_tf = exec_tfs[-1]
+        recent_3 = micro_c[-3:]
+        buf = _calc_avg_range(micro_c, 15) * 0.35
+        if direction == "SELL":
+            entry_low = current_price
+            entry_high = max(c["high"] for c in recent_3)
+            sl = entry_high + buf
+            z_name = f"Rejection Wick ({used_tf})"
+        else:
+            entry_high = current_price
+            entry_low = min(c["low"] for c in recent_3)
+            sl = entry_low - buf
+            z_name = f"Rejection Wick ({used_tf})"
 
     if direction == "SELL":
-        z_name, z_low, z_high = info_mid["sell_zone"]
-        # Jika harga saat ini sudah masuk/melewati zona tengah, geser zona ke area harga berjalan agar tetap valid
-        if current_price > z_high:
-            z_low = current_price
-            z_high = current_price + avg_rng * 0.35
-            z_name = f"Zona Supply Aktif ({tf_mid})"
-        elif z_low - current_price > avg_rng * 3.5:
-            # Batasi jarak jemputan agar realistis
-            z_low = current_price + avg_rng * 0.65
-            z_high = z_low + avg_rng * 0.40
-            z_name = f"Area FVG/Supply Terdekat ({tf_mid})"
-
-        entry_low = min(z_low, z_high)
-        entry_high = max(z_low, z_high)
-        sl = entry_high + avg_rng * 1.15
-        risk = max(sl - entry_low, avg_rng * 0.6)
+        risk = max(sl - entry_low, (1.5 if symbol == "XAUUSD" else 120.0))
         tp1 = entry_low - risk * 1.0
-        tp2 = entry_low - risk * 2.0
-        tp3 = entry_low - risk * 3.0
+        tp2 = entry_low - risk * 1.8
+        tp3 = entry_low - risk * 2.5
     else:
-        z_name, z_low, z_high = info_mid["buy_zone"]
-        if current_price < z_low:
-            z_high = current_price
-            z_low = current_price - avg_rng * 0.35
-            z_name = f"Zona Demand Aktif ({tf_mid})"
-        elif current_price - z_high > avg_rng * 3.5:
-            z_high = current_price - avg_rng * 0.65
-            z_low = z_high - avg_rng * 0.40
-            z_name = f"Area FVG/Demand Terdekat ({tf_mid})"
-
-        entry_low = min(z_low, z_high)
-        entry_high = max(z_low, z_high)
-        sl = entry_low - avg_rng * 1.15
-        risk = max(entry_high - sl, avg_rng * 0.6)
+        risk = max(entry_high - sl, (1.5 if symbol == "XAUUSD" else 120.0))
         tp1 = entry_high + risk * 1.0
-        tp2 = entry_high + risk * 2.0
-        tp3 = entry_high + risk * 3.0
+        tp2 = entry_high + risk * 1.8
+        tp3 = entry_high + risk * 2.5
 
-    # Label status TF terkecil untuk ditampilkan di baris Confluence
-    if (direction == "BUY" and info_low["bias"] == "Bullish") or (direction == "SELL" and info_low["bias"] == "Bearish"):
-        low_label = f"{info_low['bias']} / Searah"
-        exec_note = f"Struktur {tf_high} & {tf_low} kompak {info_high['bias']}. Harga siap merespons {z_name} di {tf_mid}."
+    if (direction == "BUY" and bias_low == "Bullish") or (direction == "SELL" and bias_low == "Bearish"):
+        low_label = f"{bias_low} / Searah"
+        exec_note = f"Struktur {tf_high} & {tf_mid} {bias_high}. Titik presisi ditarik dari {z_name} pada {used_tf}."
     else:
         low_label = "Pullback / Koreksi"
-        exec_note = f"Struktur utama {tf_high} {info_high['bias']}. Harga sedang koreksi di {tf_low} menuju {z_name} pada {tf_mid}."
+        exec_note = f"Tren utama {tf_high} {bias_high}. Menunggu harga menyentuh {z_name} pada {used_tf} (SL di balik ekor struktur)."
 
     sesi_nama, _ = get_current_wib_session()
 
@@ -342,8 +370,8 @@ def analyze_hybrid_3tf(symbol, mode):
         "tf_high": tf_high,
         "tf_mid": tf_mid,
         "tf_low": tf_low,
-        "bias_high": info_high["bias"],
-        "bias_mid": info_mid["bias"],
+        "bias_high": bias_high,
+        "bias_mid": bias_mid,
         "bias_low_label": low_label,
         "price": current_price,
         "direction": direction,
@@ -357,7 +385,6 @@ def analyze_hybrid_3tf(symbol, mode):
         "session_name": sesi_nama
     }
 
-    # Simpan sinyal ke riwayat Winrate
     try:
         record_new_signal(result)
     except Exception as err:
