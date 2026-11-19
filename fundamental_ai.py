@@ -6,14 +6,14 @@ import html
 from datetime import datetime
 from config import (
     GEMINI_API_KEY, GEMINI_MODELS, WIB, BULAN_ID,
-    SESSION, log, api_get, extract_raw_time,
+    SESSION, log, api_get, format_price, extract_raw_time,
     parse_event_dt_wib, format_wib_time
 )
 
 LAST_GEMINI_ERROR = ""
 RESPONSE_CACHE = {}
 CALENDAR_CACHE_TTL = 900   # 15 menit
-NEWS_CACHE_TTL = 600       # 10 menit
+MACRO_CACHE_TTL = 300      # 5 menit
 
 
 def call_gemini_json(prompt_text):
@@ -65,6 +65,118 @@ def call_gemini_json(prompt_text):
     return None
 
 
+# ============================================================
+# ANALISA MAKRO: USOIL & DXY (BAHASA AWAM + DAMPAK KE EMAS)
+# ============================================================
+
+def _fetch_macro_candles(symbol):
+    """
+    Mencoba mengambil candle H4 / H1 untuk USOIL atau DXY dari API.
+    """
+    symbol_aliases = {
+        "USOIL": ["USOIL", "WTI", "CRUDEOIL", "XTIUSD"],
+        "DXY": ["DXY", "USDX", "DX"]
+    }
+    candidates = symbol_aliases.get(symbol, [symbol])
+    last_err = None
+
+    for sym in candidates:
+        for interval in ("4h", "1h", "1d"):
+            try:
+                data = api_get(f"/api/{sym}/ohlc", params={"interval": interval, "limit": 50})
+                bars = data.get("bars") if isinstance(data, dict) else None
+                if isinstance(bars, list) and len(bars) >= 10:
+                    valid = []
+                    for b in bars:
+                        if all(b.get(k) is not None for k in ("open", "high", "low", "close")):
+                            valid.append({
+                                "open": float(b["open"]),
+                                "high": float(b["high"]),
+                                "low": float(b["low"]),
+                                "close": float(b["close"])
+                            })
+                    if len(valid) >= 10:
+                        return valid
+            except Exception as err:
+                last_err = err
+                continue
+
+    raise ValueError(f"Data harga {symbol} sementara tidak tersedia dari server ({last_err}).")
+
+
+def get_macro_market_report(symbol, force_refresh=False):
+    symbol = symbol.upper()
+    cache_key = f"macro_{symbol}"
+    now_ts = time.time()
+    cached = RESPONSE_CACHE.get(cache_key)
+    if not force_refresh and cached and (now_ts - cached[0] < MACRO_CACHE_TTL):
+        return cached[1]
+
+    candles = _fetch_macro_candles(symbol)
+    cur_price = candles[-1]["close"]
+    prev_close = candles[-6]["close"] if len(candles) >= 6 else candles[0]["close"]
+    res_level = max(c["high"] for c in candles[-20:])
+    sup_level = min(c["low"] for c in candles[-20:])
+
+    is_bullish = cur_price >= prev_close
+    now_wib = datetime.now(WIB)
+    bulan = BULAN_ID.get(now_wib.month, now_wib.strftime("%b"))
+    waktu_str = f"{now_wib.day:02d} {bulan} {now_wib.year} • {now_wib.strftime('%H:%M')} WIB"
+
+    if symbol == "USOIL":
+        arah_txt = "🟢 <b>NAIK / MENGUAT (Bullish)</b>" if is_bullish else "🔴 <b>TURUN / MELEMAH (Bearish)</b>"
+        kondisi_skrg = (
+            "Harga minyak dunia sedang menguat karena permintaan atau ketegangan pasokan energi. "
+            "Kenaikan minyak berpotensi memicu kekhawatiran inflasi."
+            if is_bullish else
+            "Harga minyak dunia sedang dalam tekanan turun karena pasokan masih mencukupi. "
+            "Penurunan minyak cenderung meredakan tekanan inflasi global."
+        )
+        text = (
+            "🛢️ <b>ANALISA MARKET: USOIL (Minyak Mentah)</b>\n"
+            f"🕒 Update: {waktu_str}\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 <b>Arah Tren Harian:</b> {arah_txt}\n"
+            f"💵 <b>Harga Saat Ini:</b> <code>${format_price(cur_price)}</code> / barel\n\n"
+            "📍 <b>Batas Penting Hari Ini:</b>\n"
+            f"• Batas Atas (Resisten): <code>${format_price(res_level)}</code>\n"
+            f"• Batas Bawah (Support): <code>${format_price(sup_level)}</code>\n\n"
+            "💡 <b>Penjelasan &amp; Dampak ke Emas (XAUUSD):</b>\n"
+            f"{kondisi_skrg}\n\n"
+            "• <b>Jika USOIL Naik Tajam:</b> Biaya energi &amp; barang ikut mahal (inflasi naik). Investor biasanya memborong <b>Emas (XAUUSD)</b> sebagai pelindung nilai, sehingga Emas terdorong <b>ikut NAIK</b>.\n"
+            "• <b>Jika USOIL Turun:</b> Tekanan inflasi mereda, sehingga daya tarik Emas berkurang dan <b>XAUUSD cenderung tertahan atau koreksi TURUN</b> (kecuali ada konflik geopolitik mendadak)."
+        )
+    else:
+        arah_txt = "🟢 <b>MENGUAT (Bullish)</b>" if is_bullish else "🔴 <b>MELEMAH (Bearish)</b>"
+        kondisi_skrg = (
+            f"Dolar AS sedang kuat. Selama DXY bertahan di atas <code>{format_price(sup_level)}</code> dan mengarah ke <code>{format_price(res_level)}</code>, "
+            "harga <b>XAUUSD (Emas) dan BTCUSD cenderung tertekan turun</b>."
+            if is_bullish else
+            f"Dolar AS sedang melemah. Selama DXY tertahan di bawah <code>{format_price(res_level)}</code> dan mengarah ke <code>{format_price(sup_level)}</code>, "
+            "harga <b>XAUUSD (Emas) dan BTCUSD berpeluang besar terdorong NAIK</b>."
+        )
+        text = (
+            "💵 <b>ANALISA MARKET: DXY (Indeks Dolar AS)</b>\n"
+            f"🕒 Update: {waktu_str}\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 <b>Arah Tren Harian:</b> {arah_txt}\n"
+            f"📈 <b>Posisi Indeks:</b> <code>{format_price(cur_price)}</code>\n\n"
+            "📍 <b>Batas Penting Hari Ini:</b>\n"
+            f"• Batas Atas (Resisten): <code>{format_price(res_level)}</code>\n"
+            f"• Batas Bawah (Support): <code>{format_price(sup_level)}</code>\n\n"
+            "💡 <b>Dampak ke Emas (XAUUSD) &amp; Crypto (BTCUSD):</b>\n"
+            f"{kondisi_skrg}\n\n"
+            "<i>Catatan Awam: DXY adalah 'lawan' utama XAUUSD. Jika DXY hijau/naik, Emas sering merah/turun — begitu pula sebaliknya.</i>"
+        )
+
+    RESPONSE_CACHE[cache_key] = (now_ts, text)
+    return text
+
+
+# ============================================================
+# KALENDER EKONOMI US (WAKTU WIB + BAHASA AWAM)
+# ============================================================
+
 def _extract_list_payload(data):
     if isinstance(data, dict):
         for key in ("data", "events", "news", "result", "items", "articles"):
@@ -84,75 +196,19 @@ def _impact_rank_and_badge(raw_impact, title_en):
         "unemployment", "jobless claims", "ism manufacturing", "ism services"
     )
     if imp in ("high", "3", "red", "tinggi") or any(k in t for k in high_keywords):
-        return 3, "🔥 DAMPAK BESAR"
+        return 3, "🔴 DAMPAK BESAR"
     if imp in ("medium", "moderate", "2", "orange", "yellow", "sedang"):
-        return 2, "⚡ DAMPAK SEDANG"
-    return 1, "🔹 DAMPAK KECIL"
-
-
-def get_upcoming_high_impact_us_events(window_minutes=35):
-    """
-    Mengecek kalender ekonomi US dan mengembalikan daftar berita High Impact
-    (CPI, PPI, PCE, NFP, FOMC, Fed, GDP, Retail Sales, dll) yang akan rilis
-    dalam 1 hingga window_minutes menit ke depan.
-    """
-    raw_data = api_get("/api/calendar")
-    items = _extract_list_payload(raw_data)
-    if not items:
-        return []
-
-    now_wib = datetime.now(WIB)
-    upcoming = []
-
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-
-        country = str(
-            item.get("country") or item.get("currency") or item.get("ccy") or item.get("code") or ""
-        ).strip().upper()
-        if country not in ("US", "USA", "USD", "UNITED STATES", "UNITED STATES OF AMERICA"):
-            continue
-
-        title_en = str(
-            item.get("title") or item.get("event") or item.get("name") or item.get("indicator") or ""
-        ).strip()
-        if not title_en:
-            continue
-
-        raw_impact = item.get("impact") or item.get("importance") or item.get("volatility") or ""
-        rank, _ = _impact_rank_and_badge(raw_impact, title_en)
-        if rank < 3:
-            continue
-
-        dt_wib = parse_event_dt_wib(extract_raw_time(item))
-        if dt_wib is None:
-            continue
-
-        diff_minutes = (dt_wib - now_wib).total_seconds() / 60.0
-        if 1 <= diff_minutes <= window_minutes:
-            forecast = item.get("forecast") or item.get("consensus") or item.get("estimate") or "-"
-            previous = item.get("previous") or item.get("prior") or "-"
-            upcoming.append({
-                "key": f"{dt_wib.strftime('%Y%m%d_%H%M')}_{title_en}",
-                "title": title_en,
-                "time_wib": dt_wib.strftime("%H:%M WIB"),
-                "minutes_left": int(round(diff_minutes)),
-                "forecast": str(forecast),
-                "previous": str(previous)
-            })
-
-    return upcoming
+        return 2, "🟠 DAMPAK SEDANG"
+    return 1, "🟡 DAMPAK KECIL"
 
 
 def _analyze_calendar_with_gemini(events_payload):
     prompt = (
-        "Analis fundamental Emas (XAUUSD) untuk pemula (bahasa Indonesia sehari-hari, singkat, jelas).\n"
+        "Analis fundamental Emas (XAUUSD) & Dolar AS untuk orang awam (bahasa Indonesia sehari-hari, singkat, mudah dipahami).\n"
         f"Data jadwal US: {json.dumps(events_payload, ensure_ascii=False)}\n"
-        "Aturan: Bedakan penggerak utama emas (CPI/PPI/PCE, Fed/FOMC, NFP/Jobless, GDP, PMI) vs efek kecil ke emas (EIA Crude Oil dll).\n"
-        "Jika 'actual' ada isi, bandingkan vs 'forecast' (NAIK/TURUN/DATAR + %). Jika 'actual' kosong, beri arah jika hasil lebih tinggi vs lebih rendah.\n"
+        "Jika 'actual' ada isi, bandingkan vs 'forecast' (NAIK/TURUN/DATAR). Jika 'actual' kosong, jelaskan arah emas jika angka aktual lebih tinggi vs lebih rendah.\n"
         "Kembalikan JSON array urut index:\n"
-        '[{"index":0,"title_id":"Terjemahan","gold_relevance":"HIGH|MEDIUM|LOW","summary_awam":"1 kalimat singkat efeknya ke emas","is_released":false,"released_direction":"NAIK|TURUN|DATAR","released_pct":"80%","released_reason":"Singkat","if_higher_dir":"TURUN|NAIK","if_lower_dir":"NAIK|TURUN","scenario_pct":"80%"}]'
+        '[{"index":0,"title_id":"Terjemahan sederhana","summary_awam":"1 kalimat singkat artinya bagi trader","is_released":false,"released_direction":"NAIK|TURUN|DATAR","released_reason":"Singkat","if_higher_dir":"TURUN|NAIK","if_lower_dir":"NAIK|TURUN"}]'
     )
     res = call_gemini_json(prompt)
     if isinstance(res, list):
@@ -163,9 +219,9 @@ def _analyze_calendar_with_gemini(events_payload):
 def format_calendar_data(data):
     items = _extract_list_payload(data)
     if items is None:
-        return "<b>📅 KALENDER EKONOMI US</b>\n\nFormat data tidak dikenali."
+        return "<b>📰 BERITA EKONOMI US (WIB)</b>\n\nFormat data tidak dikenali."
     if not items:
-        return "<b>📅 KALENDER EKONOMI US</b>\n\nBelum ada jadwal rilis data."
+        return "<b>📰 BERITA EKONOMI US (WIB)</b>\n\nBelum ada jadwal rilis data ekonomi US."
 
     us_items = [
         item for item in items
@@ -175,7 +231,7 @@ def format_calendar_data(data):
     ]
     filtered = us_items if us_items else [i for i in items if isinstance(i, dict)]
     if not filtered:
-        return "<b>📅 KALENDER EKONOMI US</b>\n\nTidak ada jadwal ekonomi US ditemukan."
+        return "<b>📰 BERITA EKONOMI US (WIB)</b>\n\nTidak ada jadwal ekonomi US ditemukan."
 
     now_wib = datetime.now(WIB)
     today_start_wib = now_wib.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -214,20 +270,19 @@ def format_calendar_data(data):
     ]
 
     ai_map = _analyze_calendar_with_gemini(gemini_input)
-    ai_active = bool(ai_map)
 
     bulan_sekarang = BULAN_ID.get(now_wib.month, now_wib.strftime("%b"))
     tgl_hari_ini = f"{now_wib.day:02d} {bulan_sekarang} {now_wib.year}"
-    mode_label = "Analisa AI Gemini" if ai_active else "Mode Standar"
 
     header = (
-        f"<b>📅 JADWAL EKONOMI US (PANDUAN EMAS)</b>\n"
-        f"<i>Mulai {tgl_hari_ini} (WIB) • {mode_label}</i>\n"
+        f"📰 <b>JADWAL BERITA EKONOMI US (WIB)</b>\n"
+        f"📅 Mulai {tgl_hari_ini} (Waktu Indonesia Barat)\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
     )
     footer = (
         "\n━━━━━━━━━━━━━━━━━━━━\n"
-        "<i>⚠️ Hindari masuk posisi 15 menit sebelum &amp; sesudah berita Dampak Besar karena harga emas bergejolak cepat.</i>"
+        "⚠️ <b>Peringatan Manajemen Risiko:</b>\n"
+        "<i>Amankan posisi (pasang SL+ atau kurangi lot) 15 menit sebelum jam rilis berita Dampak Besar di atas karena pergerakan harga biasanya sangat cepat.</i>"
     )
 
     body_blocks = []
@@ -241,13 +296,6 @@ def format_calendar_data(data):
             if title_id.lower() != title_en.lower()
             else html.escape(title_en)
         )
-
-        rel = str(ai_info.get("gold_relevance") or "").upper()
-        display_badge = {
-            "HIGH": "🔥 DAMPAK BESAR KE EMAS",
-            "MEDIUM": "⚡ DAMPAK SEDANG KE EMAS",
-            "LOW": "🔹 DAMPAK KECIL KE EMAS"
-        }.get(rel, badge)
 
         time_wib = html.escape(format_wib_time(extract_raw_time(item)))
         is_today_tag = " <b>[HARI INI]</b>" if (dt_wib and dt_wib.date() == now_wib.date()) else ""
@@ -264,176 +312,50 @@ def format_calendar_data(data):
             summary_awam = html.escape(str(ai_info.get("summary_awam") or ""))
             if ai_info.get("is_released") and actual not in (None, ""):
                 r_dir = str(ai_info.get("released_direction") or "DATAR").upper()
-                r_pct = html.escape(str(ai_info.get("released_pct") or "65%"))
                 r_reason = html.escape(str(ai_info.get("released_reason") or ""))
                 if r_dir == "NAIK":
-                    dir_label = f"🟢 Emas berpotensi <b>NAIK 📈 (Peluang {r_pct})</b>"
+                    dir_label = "🟢 Emas (XAUUSD) cenderung <b>NAIK</b>"
                 elif r_dir == "TURUN":
-                    dir_label = f"🔴 Emas berpotensi <b>TURUN 📉 (Peluang {r_pct})</b>"
+                    dir_label = "🔴 Emas (XAUUSD) cenderung <b>TURUN</b>"
                 else:
-                    dir_label = f"⚪ Emas cenderung <b>DATAR ⚖️ (Peluang {r_pct})</b>"
+                    dir_label = "⚪ Emas (XAUUSD) cenderung <b>DATAR</b>"
                 xau_note = f"{summary_awam}\n📊 <b>Hasil Keluar:</b> {dir_label} — {r_reason}"
             else:
                 hi_dir = str(ai_info.get("if_higher_dir") or "TURUN").upper()
                 lo_dir = str(ai_info.get("if_lower_dir") or "NAIK").upper()
-                sc_pct = html.escape(str(ai_info.get("scenario_pct") or "70%"))
-                hi_fmt = "🟢 <b>NAIK 📈</b>" if hi_dir == "NAIK" else "🔴 <b>TURUN 📉</b>"
-                lo_fmt = "🟢 <b>NAIK 📈</b>" if lo_dir == "NAIK" else "🔴 <b>TURUN 📉</b>"
+                hi_fmt = "🟢 <b>NAIK</b>" if hi_dir == "NAIK" else "🔴 <b>TURUN</b>"
+                lo_fmt = "🟢 <b>NAIK</b>" if lo_dir == "NAIK" else "🔴 <b>TURUN</b>"
                 xau_note = (
                     f"{summary_awam}\n"
-                    f"💡 <b>Panduan Emas (Peluang {sc_pct}):</b>\n"
+                    f"💡 <b>Artinya bagi Trader:</b>\n"
                     f"• Jika hasil <b>LEBIH TINGGI</b> dari perkiraan ➔ Emas {hi_fmt}\n"
                     f"• Jika hasil <b>LEBIH RENDAH</b> dari perkiraan ➔ Emas {lo_fmt}"
                 )
         else:
-            pct_fallback = {3: "80%", 2: "65%", 1: "55%"}.get(rank, "65%")
             inverse_usd = any(k in title_en.lower() for k in ("unemployment", "jobless claims", "layoff"))
             if inverse_usd:
                 xau_note = (
-                    f"💡 <b>Panduan Emas (Peluang {pct_fallback}):</b>\n"
-                    f"• Jika hasil <b>LEBIH TINGGI</b> dari perkiraan ➔ Emas 🟢 <b>NAIK 📈</b>\n"
-                    f"• Jika hasil <b>LEBIH RENDAH</b> dari perkiraan ➔ Emas 🔴 <b>TURUN 📉</b>"
+                    "💡 <b>Artinya bagi Trader:</b>\n"
+                    "• Jika hasil <b>LEBIH TINGGI</b> dari perkiraan ➔ Dolar melemah, Emas 🟢 <b>NAIK</b>\n"
+                    "• Jika hasil <b>LEBIH RENDAH</b> dari perkiraan ➔ Dolar menguat, Emas 🔴 <b>TURUN</b>"
                 )
             else:
                 xau_note = (
-                    f"💡 <b>Panduan Emas (Peluang {pct_fallback}):</b>\n"
-                    f"• Jika hasil <b>LEBIH TINGGI</b> dari perkiraan ➔ Emas 🔴 <b>TURUN 📉</b>\n"
-                    f"• Jika hasil <b>LEBIH RENDAH</b> dari perkiraan ➔ Emas 🟢 <b>NAIK 📈</b>"
+                    "💡 <b>Artinya bagi Trader:</b>\n"
+                    "• Jika hasil <b>LEBIH TINGGI</b> dari perkiraan ➔ Dolar menguat, Emas 🔴 <b>TURUN</b>\n"
+                    "• Jika hasil <b>LEBIH RENDAH</b> dari perkiraan ➔ Dolar melemah, Emas 🟢 <b>NAIK</b>"
                 )
 
         block = (
             f"\n<b>{idx + 1}. {display_title}</b>\n"
-            f"🇺🇸 USD | {display_badge}{is_today_tag}\n"
-            f"🕒 <code>{time_wib}</code>\n"
-            f"📊 Hasil Asli: <b>{act_str}</b> | Perkiraan: <b>{fc_str}</b> | Lalu: <b>{prev_str}</b>\n"
+            f"🕒 <code>{time_wib}</code> | {badge}{is_today_tag}\n"
+            f"📊 Aktual: <b>{act_str}</b> | Perkiraan: <b>{fc_str}</b> | Lalu: <b>{prev_str}</b>\n"
             f"<blockquote>{xau_note}</blockquote>\n"
         )
         if current_len + len(block) > 3850:
             break
         body_blocks.append(block)
         current_len += len(block)
-
-    return header + "".join(body_blocks) + footer
-
-
-def _analyze_news_with_gemini(news_payload):
-    prompt = (
-        "Analis pasar untuk pemula (bahasa Indonesia sehari-hari, singkat, jelas).\n"
-        f"Berita US: {json.dumps(news_payload, ensure_ascii=False)}\n"
-        "Pilih maksimal 5 berita terpenting (utamakan penggerak Emas XAUUSD: The Fed, inflasi, Dolar AS, geopolitik). Tentukan efek ke emas (NAIK/TURUN/NETRAL + %).\n"
-        "Kembalikan JSON array:\n"
-        '[{"index":0,"is_gold_focus":true,"title_id":"Judul ID","issue_summary":"1 kalimat inti isu","gold_direction":"NAIK|TURUN|NETRAL","probability_pct":"75%","gold_reason":"Alasan singkat"}]'
-    )
-    res = call_gemini_json(prompt)
-    if isinstance(res, list):
-        return [item for item in res if isinstance(item, dict)]
-    return []
-
-
-def format_news_data(data):
-    items = _extract_list_payload(data)
-    if items is None:
-        return "<b>📰 BERITA MARKET US &amp; EMAS (XAUUSD)</b>\n\nFormat data tidak dikenali."
-    if not items:
-        return "<b>📰 BERITA MARKET US &amp; EMAS (XAUUSD)</b>\n\nBelum ada berita terbaru."
-
-    valid_items = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        title_en = str(item.get("title") or item.get("headline") or item.get("name") or "").strip()
-        if not title_en:
-            continue
-        summary_en = str(
-            item.get("summary") or item.get("description") or item.get("snippet") or item.get("text") or ""
-        ).strip()
-        summary_en = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", summary_en)).strip()
-        if len(summary_en) > 160:
-            summary_en = summary_en[:157].rsplit(" ", 1)[0] + "..."
-        valid_items.append((title_en, summary_en, item))
-
-    if not valid_items:
-        return "<b>📰 BERITA MARKET US &amp; EMAS (XAUUSD)</b>\n\nBelum ada berita valid."
-
-    sample_items = valid_items[:7]
-    gemini_input = [
-        {"index": idx, "title": t, "snippet": s}
-        for idx, (t, s, _) in enumerate(sample_items)
-    ]
-
-    ai_news_list = _analyze_news_with_gemini(gemini_input)
-    ai_active = bool(ai_news_list)
-    mode_label = "Analisa Isu AI Gemini" if ai_active else "Mode Standar"
-
-    header = (
-        f"<b>📰 BERITA MARKET US &amp; EFEK KE EMAS (XAUUSD)</b>\n"
-        f"<i>Bahasa Indonesia Sederhana • {mode_label}</i>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-    )
-    footer = (
-        "\n━━━━━━━━━━━━━━━━━━━━\n"
-        "<i>💡 Berita bertanda <b>FOKUS EMAS</b> adalah isu yang paling berpengaruh pada pergerakan harga XAUUSD.</i>"
-    )
-
-    body_blocks = []
-    current_len = len(header) + len(footer)
-
-    if ai_active:
-        for order_num, ai_item in enumerate(ai_news_list[:5]):
-            orig_idx = ai_item.get("index", 0)
-            if not isinstance(orig_idx, int) or orig_idx < 0 or orig_idx >= len(sample_items):
-                orig_idx = min(order_num, len(sample_items) - 1)
-
-            title_en, _, raw_item = sample_items[orig_idx]
-            is_gold = bool(ai_item.get("is_gold_focus", False))
-            title_id = html.escape(str(ai_item.get("title_id") or title_en).strip())
-            issue_summary = html.escape(str(ai_item.get("issue_summary") or "").strip())
-            direction = str(ai_item.get("gold_direction") or "NETRAL").upper()
-            prob_pct = html.escape(str(ai_item.get("probability_pct") or "60%").strip())
-            reason = html.escape(str(ai_item.get("gold_reason") or "").strip())
-
-            source = html.escape(
-                str(raw_item.get("source") or raw_item.get("publisher") or raw_item.get("site") or "Market Wire").strip()
-            )
-            time_wib = html.escape(format_wib_time(extract_raw_time(raw_item)))
-            tag = "🥇 <b>FOKUS EMAS</b>" if is_gold else "🇺🇸 <b>BERITA US</b>"
-
-            if direction == "NAIK":
-                effect_line = f"🟢 <b>Efek ke Emas:</b> Berpotensi <b>NAIK 📈 (Peluang {prob_pct})</b> — {reason}"
-            elif direction == "TURUN":
-                effect_line = f"🔴 <b>Efek ke Emas:</b> Berpotensi <b>TURUN 📉 (Peluang {prob_pct})</b> — {reason}"
-            else:
-                effect_line = f"⚪ <b>Efek ke Emas:</b> Cenderung <b>NETRAL ({prob_pct})</b> — {reason}"
-
-            summary_part = f"📌 <i>Inti Isu:</i> {issue_summary}\n" if issue_summary else ""
-            block = (
-                f"\n{tag} • <i>{source}</i>\n"
-                f"<b>{order_num + 1}. {title_id}</b>\n"
-                f"🕒 <code>{time_wib}</code>\n"
-                f"<blockquote>{summary_part}{effect_line}</blockquote>\n"
-            )
-            if current_len + len(block) > 3850:
-                break
-            body_blocks.append(block)
-            current_len += len(block)
-    else:
-        diag_note = html.escape(LAST_GEMINI_ERROR or "Pastikan GEMINI_API_KEY sudah diatur.")
-        for idx, (title_en, summary_en, raw_item) in enumerate(sample_items[:5]):
-            source = html.escape(
-                str(raw_item.get("source") or raw_item.get("publisher") or raw_item.get("site") or "Market Wire").strip()
-            )
-            time_wib = html.escape(format_wib_time(extract_raw_time(raw_item)))
-            block = (
-                f"\n🇺🇸 <b>BERITA US</b> • <i>{source}</i>\n"
-                f"<b>{idx + 1}. {html.escape(title_en)}</b>\n"
-                f"🕒 <code>{time_wib}</code>\n"
-                f"<blockquote>{html.escape(summary_en or 'Tidak ada ringkasan.')}\n"
-                f"⚠️ <i>{diag_note}</i></blockquote>\n"
-            )
-            if current_len + len(block) > 3850:
-                break
-            body_blocks.append(block)
-            current_len += len(block)
 
     return header + "".join(body_blocks) + footer
 
@@ -446,15 +368,4 @@ def get_cached_calendar(force_refresh=False):
     raw_result = api_get("/api/calendar")
     formatted = format_calendar_data(raw_result)
     RESPONSE_CACHE["calendar"] = (now_ts, formatted)
-    return formatted
-
-
-def get_cached_news(force_refresh=False):
-    now_ts = time.time()
-    cached = RESPONSE_CACHE.get("news")
-    if not force_refresh and cached and (now_ts - cached[0] < NEWS_CACHE_TTL):
-        return cached[1]
-    raw_result = api_get("/api/news/market", params={"language": "en", "country": "US", "maxResults": 8})
-    formatted = format_news_data(raw_result)
-    RESPONSE_CACHE["news"] = (now_ts, formatted)
     return formatted
