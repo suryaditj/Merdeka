@@ -559,6 +559,24 @@
       "tp3": 3540.214,
       "triggered": false,
       "status": "OPEN"
+    },
+    {
+      "id": "20261120113355",
+      "created_ts": 1795149235,
+      "time_wib": "20/11 11:33 WIB",
+      "date_ymd": "2026-11-20",
+      "symbol": "XAUUSD",
+      "mode": "SCALPING",
+      "direction": "SELL",
+      "entry_low": 3530.388,
+      "entry_high": 3531.588,
+      "entry_mid": 3530.988,
+      "sl": 3533.788,
+      "tp1": 3526.988,
+      "tp2": 3524.268,
+      "tp3": 3521.888,
+      "triggered": false,
+      "status": "OPEN"
     }
   ]
 }
