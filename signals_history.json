@@ -667,6 +667,24 @@
       "tp3": 3510.63,
       "triggered": true,
       "status": "SL"
+    },
+    {
+      "id": "20261122061318",
+      "created_ts": 1795302798,
+      "time_wib": "22/11 06:13 WIB",
+      "date_ymd": "2026-11-22",
+      "symbol": "BTCUSD",
+      "mode": "SCALPING",
+      "direction": "BUY",
+      "entry_low": 60222.89,
+      "entry_high": 60276.2256,
+      "entry_mid": 60249.5578,
+      "sl": 60184.7931,
+      "tp1": 60416.2256,
+      "tp2": 60528.2256,
+      "tp3": 60626.2256,
+      "triggered": true,
+      "status": "OPEN"
     }
   ]
 }
