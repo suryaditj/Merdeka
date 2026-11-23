@@ -863,8 +863,8 @@
       "tp1": 3614.64,
       "tp2": 3611.92,
       "tp3": 3609.54,
-      "triggered": false,
-      "status": "OPEN"
+      "triggered": true,
+      "status": "TP2"
     }
   ]
 }
