@@ -1313,7 +1313,7 @@
       "tp1": 3629.764,
       "tp2": 3627.044,
       "tp3": 3624.664,
-      "triggered": false,
+      "triggered": true,
       "status": "OPEN"
     }
   ]
