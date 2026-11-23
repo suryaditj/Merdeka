@@ -143,8 +143,8 @@
       "tp1": 3660.4546,
       "tp2": 3656.7609,
       "tp3": 3653.5289,
-      "triggered": false,
-      "status": "OPEN"
+      "triggered": true,
+      "status": "TP3"
     },
     {
       "id": "20261120051436",
@@ -161,8 +161,8 @@
       "tp1": 3680.584,
       "tp2": 3674.4908,
       "tp3": 3669.1593,
-      "triggered": false,
-      "status": "OPEN"
+      "triggered": true,
+      "status": "TP3"
     },
     {
       "id": "20261120054219",
@@ -1296,7 +1296,7 @@
       "tp2": 3634.157,
       "tp3": 3636.537,
       "triggered": true,
-      "status": "TP2"
+      "status": "TP3"
     },
     {
       "id": "20261123142700",
