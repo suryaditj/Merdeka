@@ -720,7 +720,7 @@
       "tp2": 3579.0125,
       "tp3": 3581.3925,
       "triggered": true,
-      "status": "TP2"
+      "status": "TP3"
     },
     {
       "id": "20261123072916",
@@ -737,8 +737,8 @@
       "tp1": 3578.1266,
       "tp2": 3575.4066,
       "tp3": 3573.0266,
-      "triggered": false,
-      "status": "OPEN"
+      "triggered": true,
+      "status": "SL"
     },
     {
       "id": "20261123074516",
@@ -773,8 +773,8 @@
       "tp1": 3578.1266,
       "tp2": 3575.4066,
       "tp3": 3573.0266,
-      "triggered": false,
-      "status": "OPEN"
+      "triggered": true,
+      "status": "SL"
     },
     {
       "id": "20261123080017",
@@ -792,7 +792,7 @@
       "tp2": 3577.7932,
       "tp3": 3580.1732,
       "triggered": true,
-      "status": "TP2"
+      "status": "TP3"
     },
     {
       "id": "20261123080202",
@@ -809,8 +809,8 @@
       "tp1": 3578.2317,
       "tp2": 3575.5117,
       "tp3": 3573.1317,
-      "triggered": false,
-      "status": "OPEN"
+      "triggered": true,
+      "status": "SL"
     }
   ]
 }
