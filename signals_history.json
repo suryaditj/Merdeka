@@ -719,8 +719,8 @@
       "tp1": 3576.2925,
       "tp2": 3579.0125,
       "tp3": 3581.3925,
-      "triggered": false,
-      "status": "OPEN"
+      "triggered": true,
+      "status": "TP2"
     },
     {
       "id": "20261123072916",
